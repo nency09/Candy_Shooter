@@ -1,0 +1,25 @@
+name: candy_shooter
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.8.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+  audioplayers: ^6.5.1
+  shared_preferences: ^2.5.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/sounds/candy_pop.wav
+    - assets/sounds/dragon_bubble_pop.mp3
+    - assets/sounds/universfield_bubble_pop.mp3
