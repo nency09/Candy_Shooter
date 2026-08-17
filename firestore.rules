@@ -1,0 +1,35 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // Every player can read and update only their own saved game profile.
+    match /users/{userId} {
+      allow read, write: if signedIn() && request.auth.uid == userId;
+    }
+
+    match /weeklyLeaderboards/{weekId}/players/{userId} {
+      // A signed-in player can see this week's ranks.
+      allow read: if signedIn();
+
+      // A player can only create or improve their own entry.
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.displayName is string
+        && request.resource.data.score is int
+        && request.resource.data.score >= 0;
+
+      allow update: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.score is int
+        && request.resource.data.score >= resource.data.score;
+
+      allow delete: if false;
+    }
+  }
+}

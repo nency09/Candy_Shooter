@@ -1,0 +1,86 @@
+import '../models/game_models.dart';
+
+const chapters = <ChapterConfig>[
+  ChapterConfig(
+    id: 1,
+    name: 'Sweet Beginnings',
+    startLevel: 1,
+    reward: BoosterType.bomb,
+    rewardAmount: 3,
+    coinReward: 100,
+  ),
+  ChapterConfig(
+    id: 2,
+    name: 'Candy Valley',
+    startLevel: 11,
+    reward: BoosterType.rainbow,
+    rewardAmount: 3,
+    coinReward: 150,
+  ),
+  ChapterConfig(
+    id: 3,
+    name: 'Chocolate Hills',
+    startLevel: 21,
+    reward: BoosterType.lightning,
+    rewardAmount: 3,
+    coinReward: 200,
+  ),
+  ChapterConfig(
+    id: 4,
+    name: 'Lollipop Forest',
+    startLevel: 31,
+    reward: BoosterType.goldenAim,
+    rewardAmount: 3,
+    coinReward: 250,
+  ),
+  ChapterConfig(
+    id: 5,
+    name: 'Cupcake Town',
+    startLevel: 41,
+    reward: BoosterType.megaBomb,
+    rewardAmount: 3,
+    coinReward: 300,
+  ),
+  ChapterConfig(
+    id: 6,
+    name: 'Donut Mountain',
+    startLevel: 51,
+    reward: BoosterType.rainbow,
+    rewardAmount: 3,
+    coinReward: 350,
+  ),
+  ChapterConfig(
+    id: 7,
+    name: 'Ice Cream Island',
+    startLevel: 61,
+    reward: BoosterType.lightning,
+    rewardAmount: 3,
+    coinReward: 400,
+  ),
+  ChapterConfig(
+    id: 8,
+    name: 'Gummy Kingdom',
+    startLevel: 71,
+    reward: BoosterType.goldenAim,
+    rewardAmount: 3,
+    coinReward: 450,
+  ),
+  ChapterConfig(
+    id: 9,
+    name: 'Rainbow Castle',
+    startLevel: 81,
+    reward: BoosterType.megaBomb,
+    rewardAmount: 3,
+    coinReward: 500,
+  ),
+  ChapterConfig(
+    id: 10,
+    name: 'Candy Kingdom',
+    startLevel: 91,
+    reward: BoosterType.bomb,
+    rewardAmount: 3,
+    coinReward: 550,
+  ),
+];
+
+ChapterConfig chapterForLevel(int level) => chapters[(level - 1) ~/ 10];

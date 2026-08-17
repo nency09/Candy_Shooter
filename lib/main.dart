@@ -3,24 +3,35 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:firebase_core/firebase_core.dart';
 
+import 'auth_screen.dart';
 import 'data/levels.dart';
+import 'data/chapters.dart';
 import 'models/game_models.dart';
+import 'services/auth_service.dart';
+import 'services/cloud_progress_service.dart';
+import 'services/leaderboard_service.dart';
 import 'services/progress_service.dart';
 import 'services/sound_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   runApp(const CandyShooterApp());
 }
 
 class AppModel extends ChangeNotifier {
   AppModel() {
+    _authSubscription = auth.authState.listen((_) => _onAuthChanged());
     _load();
   }
 
   final _store = ProgressService();
+  final auth = AuthService();
+  final leaderboard = LeaderboardService();
+  StreamSubscription? _authSubscription;
   int unlocked = 1;
   int coins = 125;
   List<int> stars = List.filled(levels.length, 0);
@@ -28,7 +39,17 @@ class AppModel extends ChangeNotifier {
   bool sound = true;
   bool music = true;
   bool haptics = true;
+  int bombBoosters = 0;
+  int rainbowBoosters = 0;
+  int lightningBoosters = 0;
+  int goldenAimBoosters = 0;
+  int megaBombBoosters = 0;
+  int extraSwapBoosters = 0;
+  Set<int> claimedChapterRewards = <int>{};
+  bool seenNewRowTutorial = false;
+  String lastLuckySpin = '';
   bool ready = false;
+  bool _loadingCloudProgress = false;
 
   Future<void> _load() async {
     final started = DateTime.now();
@@ -41,6 +62,19 @@ class AppModel extends ChangeNotifier {
       sound = saved['sound'] as bool? ?? true;
       music = saved['music'] as bool? ?? true;
       haptics = saved['haptics'] as bool? ?? true;
+      bombBoosters = math.max(0, saved['bombBoosters'] as int? ?? 0);
+      rainbowBoosters = math.max(0, saved['rainbowBoosters'] as int? ?? 0);
+      lightningBoosters = math.max(0, saved['lightningBoosters'] as int? ?? 0);
+      goldenAimBoosters = math.max(0, saved['goldenAimBoosters'] as int? ?? 0);
+      megaBombBoosters = math.max(0, saved['megaBombBoosters'] as int? ?? 0);
+      extraSwapBoosters = math.max(0, saved['extraSwapBoosters'] as int? ?? 0);
+      claimedChapterRewards =
+          (saved['claimedChapterRewards'] as List? ?? const [])
+              .map((value) => int.tryParse('$value'))
+              .whereType<int>()
+              .toSet();
+      seenNewRowTutorial = saved['seenNewRowTutorial'] as bool? ?? false;
+      lastLuckySpin = saved['lastLuckySpin'] as String? ?? '';
     } catch (_) {
       // Invalid local data falls back to a fresh, playable profile.
     }
@@ -49,6 +83,7 @@ class AppModel extends ChangeNotifier {
     if (!remaining.isNegative) await Future<void>.delayed(remaining);
     ready = true;
     notifyListeners();
+    _onAuthChanged();
   }
 
   List<int> _normaliseScores(Object? values) {
@@ -61,24 +96,347 @@ class AppModel extends ChangeNotifier {
     );
   }
 
-  Future<void> _save() => _store.save(
-    unlocked: unlocked,
-    coins: coins,
-    stars: stars,
-    scores: scores,
-    sound: sound,
-    music: music,
-    haptics: haptics,
-  );
+  Future<void> _save() async {
+    await _store.save(
+      unlocked: unlocked,
+      coins: coins,
+      stars: stars,
+      scores: scores,
+      sound: sound,
+      music: music,
+      haptics: haptics,
+      bombBoosters: bombBoosters,
+      rainbowBoosters: rainbowBoosters,
+      lightningBoosters: lightningBoosters,
+      goldenAimBoosters: goldenAimBoosters,
+      megaBombBoosters: megaBombBoosters,
+      extraSwapBoosters: extraSwapBoosters,
+      claimedChapterRewards: claimedChapterRewards.toList(),
+      seenNewRowTutorial: seenNewRowTutorial,
+      lastLuckySpin: lastLuckySpin,
+    );
+    _saveCloudProgress();
+  }
 
-  Future<void> finishLevel(int level, int score, int earnedStars) async {
+  Map<String, Object> _cloudProgressSnapshot() {
+    final user = auth.currentUser;
+    return {
+      'displayName': user?.displayName?.trim().isNotEmpty == true
+          ? user!.displayName!.trim()
+          : (user?.email?.split('@').first ?? 'Candy Player'),
+      'email': user?.email ?? '',
+      'unlocked': unlocked,
+      'coins': coins,
+      'stars': stars,
+      'scores': scores,
+      'sound': sound,
+      'music': music,
+      'haptics': haptics,
+      'bombBoosters': bombBoosters,
+      'rainbowBoosters': rainbowBoosters,
+      'lightningBoosters': lightningBoosters,
+      'goldenAimBoosters': goldenAimBoosters,
+      'megaBombBoosters': megaBombBoosters,
+      'extraSwapBoosters': extraSwapBoosters,
+      'claimedChapterRewards': claimedChapterRewards.toList(),
+      'seenNewRowTutorial': seenNewRowTutorial,
+      'lastLuckySpin': lastLuckySpin,
+    };
+  }
+
+  void _onAuthChanged() {
+    if (!ready) return;
+    final user = auth.currentUser;
+    if (user != null) _loadCloudProgress(user.uid);
+  }
+
+  Future<void> _loadCloudProgress(String uid) async {
+    if (_loadingCloudProgress) return;
+    _loadingCloudProgress = true;
+    final cloud = CloudProgressService(uid);
+    try {
+      final saved = await cloud.load();
+      if (saved == null) {
+        await cloud.save(_cloudProgressSnapshot());
+        return;
+      }
+      _mergeCloudProgress(saved);
+      await _store.save(
+        unlocked: unlocked,
+        coins: coins,
+        stars: stars,
+        scores: scores,
+        sound: sound,
+        music: music,
+        haptics: haptics,
+        bombBoosters: bombBoosters,
+        rainbowBoosters: rainbowBoosters,
+        lightningBoosters: lightningBoosters,
+        goldenAimBoosters: goldenAimBoosters,
+        megaBombBoosters: megaBombBoosters,
+        extraSwapBoosters: extraSwapBoosters,
+        claimedChapterRewards: claimedChapterRewards.toList(),
+        seenNewRowTutorial: seenNewRowTutorial,
+        lastLuckySpin: lastLuckySpin,
+      );
+      await cloud.save(_cloudProgressSnapshot());
+      notifyListeners();
+    } catch (_) {
+      // The game remains fully playable if the device is temporarily offline.
+    } finally {
+      _loadingCloudProgress = false;
+    }
+  }
+
+  void _mergeCloudProgress(Map<String, Object> saved) {
+    final cloudUnlocked = ((saved['unlocked'] as num?)?.toInt() ?? 1).clamp(
+      1,
+      levels.length,
+    );
+    unlocked = math.max(unlocked, cloudUnlocked);
+    coins = math.max(
+      0,
+      math.max(coins, (saved['coins'] as num?)?.toInt() ?? 0),
+    );
+    final cloudStars = _normaliseScores(saved['stars']);
+    final cloudScores = _normaliseScores(saved['scores']);
+    stars = List<int>.generate(
+      levels.length,
+      (index) => math.max(stars[index], cloudStars[index]),
+    );
+    scores = List<int>.generate(
+      levels.length,
+      (index) => math.max(scores[index], cloudScores[index]),
+    );
+    sound = saved['sound'] as bool? ?? sound;
+    music = saved['music'] as bool? ?? music;
+    haptics = saved['haptics'] as bool? ?? haptics;
+    bombBoosters = math.max(
+      bombBoosters,
+      (saved['bombBoosters'] as num?)?.toInt() ?? 0,
+    );
+    rainbowBoosters = math.max(
+      rainbowBoosters,
+      (saved['rainbowBoosters'] as num?)?.toInt() ?? 0,
+    );
+    lightningBoosters = math.max(
+      lightningBoosters,
+      (saved['lightningBoosters'] as num?)?.toInt() ?? 0,
+    );
+    goldenAimBoosters = math.max(
+      goldenAimBoosters,
+      (saved['goldenAimBoosters'] as num?)?.toInt() ?? 0,
+    );
+    megaBombBoosters = math.max(
+      megaBombBoosters,
+      (saved['megaBombBoosters'] as num?)?.toInt() ?? 0,
+    );
+    extraSwapBoosters = math.max(
+      extraSwapBoosters,
+      (saved['extraSwapBoosters'] as num?)?.toInt() ?? 0,
+    );
+    claimedChapterRewards.addAll(
+      (saved['claimedChapterRewards'] as List? ?? const [])
+          .map((value) => int.tryParse('$value'))
+          .whereType<int>(),
+    );
+    seenNewRowTutorial =
+        seenNewRowTutorial || (saved['seenNewRowTutorial'] as bool? ?? false);
+    final cloudSpin = saved['lastLuckySpin'] as String? ?? '';
+    if (cloudSpin.compareTo(lastLuckySpin) > 0) lastLuckySpin = cloudSpin;
+  }
+
+  void _saveCloudProgress() {
+    final user = auth.currentUser;
+    if (user == null || _loadingCloudProgress) return;
+    CloudProgressService(
+      user.uid,
+    ).save(_cloudProgressSnapshot()).catchError((_) {});
+  }
+
+  int boosterCount(BoosterType type) => switch (type) {
+    BoosterType.bomb => bombBoosters,
+    BoosterType.rainbow => rainbowBoosters,
+    BoosterType.lightning => lightningBoosters,
+    BoosterType.goldenAim => goldenAimBoosters,
+    BoosterType.megaBomb => megaBombBoosters,
+    BoosterType.extraSwap => extraSwapBoosters,
+  };
+
+  bool isChapterUnlocked(ChapterConfig chapter) =>
+      chapter.id == 1 || claimedChapterRewards.contains(chapter.id - 1);
+
+  Future<ChapterConfig?> finishLevel(
+    int level,
+    int score,
+    int earnedStars,
+  ) async {
     final index = level - 1;
     stars[index] = math.max(stars[index], earnedStars.clamp(1, 3));
     scores[index] = math.max(scores[index], score);
-    unlocked = math.max(unlocked, math.min(levels.length, level + 1));
+    final chapter = chapterForLevel(level);
+    final isChapterEnd = level == chapter.endLevel;
+    if (!isChapterEnd || claimedChapterRewards.contains(chapter.id)) {
+      unlocked = math.max(unlocked, math.min(levels.length, level + 1));
+    }
     coins += 15 + earnedStars * 10;
     await _save();
     notifyListeners();
+    _submitWeeklyScore(score);
+    return isChapterEnd && !claimedChapterRewards.contains(chapter.id)
+        ? chapter
+        : null;
+  }
+
+  Future<void> _submitWeeklyScore(int score) async {
+    final user = auth.currentUser;
+    if (user == null) return;
+    final suppliedName = user.displayName?.trim();
+    final displayName = suppliedName != null && suppliedName.isNotEmpty
+        ? suppliedName
+        : (user.email?.split('@').first ?? 'Candy Player');
+    try {
+      await leaderboard.submitBestScore(
+        uid: user.uid,
+        displayName: displayName,
+        score: score,
+      );
+    } catch (_) {
+      // A finished level is never blocked by a temporary leaderboard failure.
+    }
+  }
+
+  Future<void> claimChapterReward(ChapterConfig chapter) async {
+    if (claimedChapterRewards.contains(chapter.id)) return;
+    claimedChapterRewards.add(chapter.id);
+    coins += chapter.coinReward;
+    switch (chapter.reward) {
+      case BoosterType.bomb:
+        bombBoosters += chapter.rewardAmount;
+      case BoosterType.rainbow:
+        rainbowBoosters += chapter.rewardAmount;
+      case BoosterType.lightning:
+        lightningBoosters += chapter.rewardAmount;
+      case BoosterType.goldenAim:
+        goldenAimBoosters += chapter.rewardAmount;
+      case BoosterType.megaBomb:
+        megaBombBoosters += chapter.rewardAmount;
+      case BoosterType.extraSwap:
+        extraSwapBoosters += chapter.rewardAmount;
+    }
+    if (chapter.endLevel < levels.length) {
+      unlocked = math.max(unlocked, chapter.endLevel + 1);
+    }
+    await _save();
+    notifyListeners();
+  }
+
+  Future<bool> useBooster(BoosterType type) async {
+    if (boosterCount(type) == 0) return false;
+    switch (type) {
+      case BoosterType.bomb:
+        bombBoosters--;
+      case BoosterType.rainbow:
+        rainbowBoosters--;
+      case BoosterType.lightning:
+        lightningBoosters--;
+      case BoosterType.goldenAim:
+        goldenAimBoosters--;
+      case BoosterType.megaBomb:
+        megaBombBoosters--;
+      case BoosterType.extraSwap:
+        extraSwapBoosters--;
+    }
+    await _save();
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> buyBooster(BoosterType type, int cost) async {
+    if (cost <= 0 || coins < cost) return false;
+    coins -= cost;
+    switch (type) {
+      case BoosterType.bomb:
+        bombBoosters++;
+      case BoosterType.rainbow:
+        rainbowBoosters++;
+      case BoosterType.lightning:
+        lightningBoosters++;
+      case BoosterType.goldenAim:
+        goldenAimBoosters++;
+      case BoosterType.megaBomb:
+        megaBombBoosters++;
+      case BoosterType.extraSwap:
+        extraSwapBoosters++;
+    }
+    await _save();
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> grantMysteryReward({
+    int coinsWon = 0,
+    BoosterType? booster,
+  }) async {
+    coins += math.max(0, coinsWon);
+    switch (booster) {
+      case BoosterType.bomb:
+        bombBoosters++;
+      case BoosterType.rainbow:
+        rainbowBoosters++;
+      case BoosterType.lightning:
+        lightningBoosters++;
+      case BoosterType.goldenAim:
+        goldenAimBoosters++;
+      case BoosterType.megaBomb:
+        megaBombBoosters++;
+      case BoosterType.extraSwap:
+        extraSwapBoosters++;
+      case null:
+        break;
+    }
+    await _save();
+    notifyListeners();
+  }
+
+  Future<void> markNewRowTutorialSeen() async {
+    seenNewRowTutorial = true;
+    await _save();
+    notifyListeners();
+  }
+
+  bool get canLuckySpin => lastLuckySpin != _today;
+  String get _today => DateTime.now().toIso8601String().substring(0, 10);
+
+  Future<String?> luckySpin() async {
+    if (!canLuckySpin) return null;
+    const rewards = [
+      '50 Coins',
+      '100 Coins',
+      'Bomb',
+      'Rainbow',
+      'Lightning',
+      'Mystery',
+    ];
+    final reward = rewards[math.Random().nextInt(rewards.length)];
+    switch (reward) {
+      case '50 Coins':
+        coins += 50;
+      case '100 Coins':
+        coins += 100;
+      case 'Bomb':
+        bombBoosters++;
+      case 'Rainbow':
+        rainbowBoosters++;
+      case 'Lightning':
+        lightningBoosters++;
+      case 'Mystery':
+        coins += 75;
+    }
+    lastLuckySpin = _today;
+    await _save();
+    notifyListeners();
+    return reward;
   }
 
   Future<void> updateSettings({bool? sound, bool? music, bool? haptics}) async {
@@ -96,8 +454,20 @@ class AppModel extends ChangeNotifier {
     stars = List.filled(levels.length, 0);
     scores = List.filled(levels.length, 0);
     sound = music = haptics = true;
+    bombBoosters = rainbowBoosters = 0;
+    lightningBoosters = goldenAimBoosters = megaBombBoosters = 0;
+    extraSwapBoosters = 0;
+    claimedChapterRewards.clear();
+    seenNewRowTutorial = false;
+    lastLuckySpin = '';
     await _save();
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _authSubscription?.cancel();
+    super.dispose();
   }
 }
 
@@ -132,7 +502,7 @@ class _CandyShooterAppState extends State<CandyShooterApp> {
   );
 }
 
-enum AppPage { home, map, game, settings, collection }
+enum AppPage { home, map, game, settings, collection, shop, leaderboard }
 
 class AppShell extends StatefulWidget {
   const AppShell({super.key, required this.model});
@@ -146,18 +516,27 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   AppPage page = AppPage.home;
   int level = 1;
+  int mapChapter = 1;
 
   void go(AppPage next, {int? selectedLevel}) {
     setState(() {
       page = next;
       if (selectedLevel != null) level = selectedLevel;
+      if (next == AppPage.map) {
+        mapChapter = chapterForLevel(widget.model.unlocked).id;
+      }
     });
   }
 
   @override
   Widget build(BuildContext context) => switch (page) {
     AppPage.home => HomeScreen(model: widget.model, go: go),
-    AppPage.map => LevelMapScreen(model: widget.model, go: go),
+    AppPage.map => LevelMapScreen(
+      model: widget.model,
+      go: go,
+      chapter: mapChapter,
+      onChapter: (chapter) => setState(() => mapChapter = chapter),
+    ),
     AppPage.settings => SettingsScreen(
       model: widget.model,
       onBack: () => go(AppPage.home),
@@ -165,6 +544,15 @@ class _AppShellState extends State<AppShell> {
     AppPage.collection => CollectionScreen(
       model: widget.model,
       onBack: () => go(AppPage.home),
+    ),
+    AppPage.shop => BoosterShopScreen(
+      model: widget.model,
+      onBack: () => go(AppPage.home),
+    ),
+    AppPage.leaderboard => LeaderboardScreen(
+      model: widget.model,
+      onBack: () => go(AppPage.home),
+      onSignIn: () => go(AppPage.settings),
     ),
     AppPage.game => GameScreen(
       key: ValueKey(level),
@@ -271,6 +659,16 @@ class HomeScreen extends StatelessWidget {
                 onTap: () => go(AppPage.collection),
               ),
               MiniNav(
+                icon: Icons.storefront_rounded,
+                label: 'Shop',
+                onTap: () => go(AppPage.shop),
+              ),
+              MiniNav(
+                icon: Icons.emoji_events_rounded,
+                label: 'Ranks',
+                onTap: () => go(AppPage.leaderboard),
+              ),
+              MiniNav(
                 icon: Icons.emoji_events_rounded,
                 label: 'Stars',
                 onTap: () => go(AppPage.map),
@@ -295,10 +693,18 @@ class HomeScreen extends StatelessWidget {
 }
 
 class LevelMapScreen extends StatelessWidget {
-  const LevelMapScreen({super.key, required this.model, required this.go});
+  const LevelMapScreen({
+    super.key,
+    required this.model,
+    required this.go,
+    required this.chapter,
+    required this.onChapter,
+  });
 
   final AppModel model;
   final void Function(AppPage, {int? selectedLevel}) go;
+  final int chapter;
+  final ValueChanged<int> onChapter;
 
   @override
   Widget build(BuildContext context) => GradientScaffold(
@@ -310,12 +716,146 @@ class LevelMapScreen extends StatelessWidget {
             onBack: () => go(AppPage.home),
             trailing: CoinPill(coins: model.coins),
           ),
-          const WorldRibbon('WORLD 1 \u2022 SWEET BEGINNINGS'),
+          WorldRibbon(
+            'WORLD $chapter • ${chapters[chapter - 1].name.toUpperCase()}',
+          ),
+          ChapterProgressCard(
+            stars: model.stars
+                .skip((chapter - 1) * 10)
+                .take(10)
+                .fold<int>(0, (sum, stars) => sum + stars),
+          ),
+          const SizedBox(height: 12),
           Expanded(
             child: WorldPathMap(
+              chapter: chapters[chapter - 1],
               unlocked: model.unlocked,
               stars: model.stars,
               onLevelTap: (number) => go(AppPage.game, selectedLevel: number),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class ChapterProgressCard extends StatelessWidget {
+  const ChapterProgressCard({super.key, required this.stars});
+
+  final int stars;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.fromLTRB(24, 14, 24, 2),
+    padding: const EdgeInsets.fromLTRB(17, 14, 17, 16),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(22),
+      border: Border.all(color: const Color(0xffffdfb4), width: 2),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x33003583),
+          offset: Offset(0, 5),
+          blurRadius: 0,
+        ),
+      ],
+    ),
+    child: Column(
+      children: [
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'CHAPTER PROGRESS',
+                style: TextStyle(
+                  color: Color(0xff573773),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+            Text(
+              '$stars / 30',
+              style: const TextStyle(
+                color: Color(0xfff6538a),
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(width: 5),
+            const Icon(Icons.star_rounded, color: Color(0xffffcb3d), size: 26),
+          ],
+        ),
+        const SizedBox(height: 12),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(9),
+          child: LinearProgressIndicator(
+            value: stars / 30,
+            minHeight: 16,
+            backgroundColor: const Color(0xffefeaf1),
+            valueColor: const AlwaysStoppedAnimation(Color(0xfff55f8a)),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class ChapterTab extends StatelessWidget {
+  const ChapterTab({
+    super.key,
+    required this.chapter,
+    required this.selected,
+    required this.locked,
+    this.onTap,
+  });
+
+  final ChapterConfig chapter;
+  final bool selected;
+  final bool locked;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(20),
+    child: Container(
+      width: 145,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: selected
+            ? const Color(0xffffe7ef)
+            : Colors.white.withValues(alpha: .88),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: selected ? const Color(0xfff6538a) : const Color(0xffddd4d5),
+          width: 2,
+        ),
+      ),
+      child: Row(
+        children: [
+          Text(
+            locked
+                ? '🔒'
+                : selected
+                ? '🍬'
+                : '🗺️',
+            style: const TextStyle(fontSize: 22),
+          ),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Text(
+              chapter.name,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: locked
+                    ? const Color(0xff938b8b)
+                    : const Color(0xff6d506d),
+                fontSize: 13,
+                fontWeight: FontWeight.w900,
+              ),
             ),
           ),
         ],
@@ -363,23 +903,30 @@ class WorldRibbon extends StatelessWidget {
 class WorldPathMap extends StatelessWidget {
   const WorldPathMap({
     super.key,
+    required this.chapter,
     required this.unlocked,
     required this.stars,
     required this.onLevelTap,
   });
 
   final int unlocked;
+  final ChapterConfig chapter;
   final List<int> stars;
   final ValueChanged<int> onLevelTap;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (_, constraints) {
-      const mapHeight = 980.0;
       final width = constraints.maxWidth;
-      final points = List<Offset>.generate(levels.length, (index) {
+      final firstVisibleLevel = math.max(1, chapter.startLevel - 10);
+      final visibleLevels = levels
+          .skip(firstVisibleLevel - 1)
+          .take(20)
+          .toList();
+      final mapHeight = math.max(1120.0, visibleLevels.length * 96.0 + 180);
+      final points = List<Offset>.generate(visibleLevels.length, (index) {
         final x = width / 2 + math.sin(index * 1.36) * width * .27;
-        return Offset(x, 64 + index * 88.0);
+        return Offset(x, 72 + index * 96.0);
       });
       return SingleChildScrollView(
         padding: const EdgeInsets.only(bottom: 20),
@@ -391,21 +938,26 @@ class WorldPathMap extends StatelessWidget {
               Positioned.fill(
                 child: CustomPaint(painter: WorldPathPainter(points)),
               ),
-              for (var index = 0; index < levels.length; index++)
+              for (var index = 0; index < visibleLevels.length; index++)
                 Positioned(
                   left: points[index].dx - 37,
                   top: points[index].dy - 37,
                   child: LevelBubble(
-                    number: index + 1,
-                    stars: stars[index],
-                    locked: index + 1 > unlocked,
-                    current: index + 1 == unlocked,
-                    onTap: index + 1 <= unlocked
-                        ? () => onLevelTap(index + 1)
+                    number: visibleLevels[index].id,
+                    stars: stars[visibleLevels[index].id - 1],
+                    locked: visibleLevels[index].id > unlocked,
+                    current: visibleLevels[index].id == unlocked,
+                    onTap: visibleLevels[index].id <= unlocked
+                        ? () => onLevelTap(visibleLevels[index].id)
                         : null,
                   ),
                 ),
-              const Positioned(left: 22, bottom: 24, child: CandyChest()),
+              Positioned(
+                left: 18,
+                right: 18,
+                bottom: 24,
+                child: ChapterRewardBanner(chapter: chapter),
+              ),
             ],
           ),
         ),
@@ -414,45 +966,42 @@ class WorldPathMap extends StatelessWidget {
   );
 }
 
-class CandyChest extends StatelessWidget {
-  const CandyChest({super.key});
+class ChapterRewardBanner extends StatelessWidget {
+  const ChapterRewardBanner({super.key, required this.chapter});
+
+  final ChapterConfig chapter;
 
   @override
-  Widget build(BuildContext context) => Column(
-    children: [
-      Container(
-        width: 58,
-        height: 45,
-        decoration: BoxDecoration(
-          color: const Color(0xffffbf3c),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: Colors.white, width: 3),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x440a5780),
-              offset: Offset(0, 4),
-              blurRadius: 0,
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(15),
+    decoration: BoxDecoration(
+      color: const Color(0xfff4608e),
+      borderRadius: BorderRadius.circular(25),
+      border: Border.all(color: const Color(0xffffb1cb), width: 2),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x44003583),
+          offset: Offset(0, 6),
+          blurRadius: 0,
+        ),
+      ],
+    ),
+    child: Row(
+      children: [
+        const Text('🎁', style: TextStyle(fontSize: 44)),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            'Complete this chapter\nto earn ${chapter.reward.emoji} ${chapter.reward.label} ×${chapter.rewardAmount}',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.w900,
             ),
-          ],
-        ),
-        child: const Icon(
-          Icons.redeem_rounded,
-          color: Color(0xffe05a55),
-          size: 32,
-        ),
-      ),
-      const SizedBox(height: 2),
-      const Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.star_rounded, color: Color(0xffffd24b), size: 16),
-          Text(
-            '10/20',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900),
           ),
-        ],
-      ),
-    ],
+        ),
+      ],
+    ),
   );
 }
 
@@ -480,8 +1029,8 @@ class HomeProgressCard extends StatelessWidget {
     ),
     child: Column(
       children: [
-        const Text(
-          'Candy Land',
+        Text(
+          chapterForLevel(level).name,
           style: TextStyle(
             color: Color(0xff684e67),
             fontWeight: FontWeight.w900,
@@ -550,6 +1099,7 @@ class BoardGeometry {
   double get wallLeft => left + ballDiameter / 2;
   double get wallRight => left + worldWidth - ballDiameter / 2;
   Offset get launcher => Offset(size.width / 2, size.height * .89);
+  double get dangerLine => launcher.dy - ballDiameter * 3.05;
 
   Offset position(CandyCell cell) {
     final first = size.width / 2 - 3 * xStep;
@@ -602,6 +1152,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   final random = math.Random();
   final List<CandyCell> board = [];
   Timer? flightTimer;
+  Timer? rowTimer;
   late final AnimationController launchController = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 260),
@@ -615,12 +1166,22 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           setState(popEffects.clear);
         }
       });
+  late final AnimationController rowController =
+      AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 420),
+      )..addStatusListener((status) {
+        if (status == AnimationStatus.completed && mounted) {
+          _settleIncomingRow();
+        }
+      });
   CandyColor current = CandyColor.strawberry;
   CandyColor next = CandyColor.lemon;
   List<Offset> aimPath = const [];
   final List<Offset> shotTrail = [];
   final List<ShotSpark> shotSparks = [];
   final List<PopEffect> popEffects = [];
+  final List<CandyCell> incomingRow = [];
   Offset? aimInput;
   Offset? flight;
   CandyColor? flyingColor;
@@ -629,30 +1190,57 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   int cleared = 0;
   int yellowCleared = 0;
   int combo = 0;
+  int rowShotCounter = 0;
+  int rowsEntered = 0;
+  int goldenAimShots = 0;
+  int freeSwaps = 1;
+  BoosterType? activeBooster;
   bool paused = false;
   bool finished = false;
   bool won = false;
+  bool chapterComplete = false;
+  ChapterConfig? completedChapter;
+  bool rowWarning = false;
+  bool rowAnimating = false;
+  BoardGeometry? activeGeometry;
   String praise = 'Aim for a sweet match!';
 
   @override
   void initState() {
     super.initState();
     _newLevel();
+    if (widget.config.id == 11 && !widget.model.seenNewRowTutorial) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _showRowTutorial());
+    } else if (widget.config.challengeTitle != null) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _showChallengeIntro(),
+      );
+    }
   }
 
   void _newLevel() {
     flightTimer?.cancel();
+    rowTimer?.cancel();
+    rowController.stop();
+    rowController.value = 0;
     board.clear();
     shots = widget.config.shots;
     score = cleared = yellowCleared = combo = 0;
+    rowShotCounter = rowsEntered = 0;
+    goldenAimShots = 0;
+    freeSwaps = 1;
+    activeBooster = null;
     aimPath = const [];
     shotTrail.clear();
     shotSparks.clear();
     popEffects.clear();
+    incomingRow.clear();
     aimInput = null;
     flight = null;
     flyingColor = null;
-    paused = finished = won = false;
+    rowWarning = rowAnimating = false;
+    paused = finished = won = chapterComplete = false;
+    completedChapter = null;
     praise = 'Aim for a sweet match!';
     for (var row = 0; row < widget.config.rows + 1; row++) {
       final columns = 7 - (row % 2);
@@ -668,6 +1256,23 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           );
         }
       }
+    }
+    if (widget.config.id >= 51 && board.isNotEmpty) {
+      final candidates = board.where((cell) => cell.row >= 2).toList();
+      final selected =
+          (candidates.isEmpty ? board : candidates)[random.nextInt(
+            candidates.isEmpty ? board.length : candidates.length,
+          )];
+      board
+        ..remove(selected)
+        ..add(
+          CandyCell(
+            selected.row,
+            selected.col,
+            selected.color,
+            isMystery: true,
+          ),
+        );
     }
     current = widget.config.colors.first;
     next = widget.config.colors[1 % widget.config.colors.length];
@@ -716,21 +1321,154 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   }
 
   void _updateAim(Offset point, BoardGeometry g) {
-    if (finished || paused || flight != null) return;
+    if (finished || paused || rowWarning || rowAnimating || flight != null) {
+      return;
+    }
     setState(() {
       aimInput = point;
       aimPath = _trajectory(point, g);
     });
   }
 
+  Future<void> _swapNextCandy() async {
+    if (finished || paused || rowWarning || rowAnimating || flight != null) {
+      return;
+    }
+    final usingFreeSwap = freeSwaps > 0;
+    if (!usingFreeSwap &&
+        !await widget.model.useBooster(BoosterType.extraSwap)) {
+      if (mounted) {
+        setState(() => praise = 'Buy an Extra Swap in the Booster Shop!');
+      }
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      final previousCurrent = current;
+      current = next;
+      next = previousCurrent;
+      if (usingFreeSwap) freeSwaps--;
+      praise = usingFreeSwap
+          ? 'Free swap used! Extra Swaps are in the shop.'
+          : 'Sweet extra swap! Aim your next shot.';
+    });
+    if (widget.model.haptics) HapticFeedback.selectionClick();
+  }
+
+  Future<void> _selectBooster(BoosterType type) async {
+    if (finished ||
+        paused ||
+        flight != null ||
+        widget.model.boosterCount(type) == 0) {
+      return;
+    }
+    if (type == BoosterType.goldenAim) {
+      if (await widget.model.useBooster(type) && mounted) {
+        setState(() {
+          goldenAimShots = 3;
+          activeBooster = null;
+          praise = 'Golden aim is ready for 3 shots!';
+        });
+      }
+      return;
+    }
+    setState(() {
+      activeBooster = activeBooster == type ? null : type;
+      praise = activeBooster == null
+          ? 'Aim for a sweet match!'
+          : 'Tap a candy to use ${type.label}!';
+    });
+  }
+
+  Future<void> _useTargetedBooster(Offset point, BoardGeometry g) async {
+    final booster = activeBooster;
+    if (booster == null || board.isEmpty) return;
+    final target = board.reduce(
+      (closest, cell) =>
+          (g.position(cell) - point).distance <
+              (g.position(closest) - point).distance
+          ? cell
+          : closest,
+    );
+    if ((g.position(target) - point).distance > g.ballDiameter * 1.8) {
+      praise = 'Tap a candy!';
+      return;
+    }
+    if (!await widget.model.useBooster(booster) || !mounted) return;
+    setState(() {
+      final removed = switch (booster) {
+        BoosterType.bomb =>
+          board
+              .where(
+                (cell) =>
+                    (g.position(cell) - g.position(target)).distance <
+                    g.ballDiameter * 1.65,
+              )
+              .toList(),
+        BoosterType.megaBomb =>
+          board
+              .where(
+                (cell) =>
+                    (g.position(cell) - g.position(target)).distance <
+                    g.ballDiameter * 2.55,
+              )
+              .toList(),
+        BoosterType.lightning =>
+          board.where((cell) => cell.row == target.row).toList(),
+        BoosterType.rainbow => _colorGroup(target, g),
+        BoosterType.goldenAim => const <CandyCell>[],
+        BoosterType.extraSwap => const <CandyCell>[],
+      };
+      final mysteryReward = _claimMysteryRewards(removed);
+      _showPop(removed, g);
+      board.removeWhere(removed.contains);
+      cleared += removed.length;
+      score += removed.length * 15;
+      activeBooster = null;
+      praise = mysteryReward ?? '${booster.label} popped ${removed.length}!';
+      final dropReward = _dropFloating(g);
+      if (dropReward != null) praise = dropReward;
+      if (widget.model.sound) {
+        SoundService.instance.playPop(candyCount: removed.length);
+      }
+      if (widget.model.haptics) HapticFeedback.mediumImpact();
+      if (_objectiveDone) _finish(true);
+    });
+  }
+
+  List<CandyCell> _colorGroup(CandyCell target, BoardGeometry g) {
+    final result = <CandyCell>[];
+    final pending = <CandyCell>[target];
+    while (pending.isNotEmpty) {
+      final cell = pending.removeLast();
+      if (result.contains(cell)) continue;
+      result.add(cell);
+      for (final neighbor in _neighbors(cell, g)) {
+        if ((neighbor.color == target.color || neighbor.isMystery) &&
+            !result.contains(neighbor)) {
+          pending.add(neighbor);
+        }
+      }
+    }
+    return result;
+  }
+
   void _shoot(Offset point, BoardGeometry g) {
-    if (finished || paused || flight != null) return;
+    if (finished ||
+        paused ||
+        rowWarning ||
+        rowAnimating ||
+        activeBooster != null ||
+        flight != null) {
+      return;
+    }
     final initial = _velocity(point, g);
     if (initial == null) return;
     if (widget.model.sound) SoundService.instance.playShoot();
     var velocity = initial;
     setState(() {
       final firedColor = current;
+      if (goldenAimShots > 0) goldenAimShots--;
       aimPath = const [];
       aimInput = null;
       flyingColor = firedColor;
@@ -798,8 +1536,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     CandyColor firedColor,
   ) {
     final options = <CandyCell>[];
-    for (var row = 0; row <= 11; row++) {
-      for (var col = 0; col < 7 - (row % 2); col++) {
+    for (var row = 0; row <= 14; row++) {
+      for (var col = 0; col < 7; col++) {
         if (board.any((cell) => cell.row == row && cell.col == col)) continue;
         final candidate = CandyCell(row, col, firedColor);
         if (row == 0 ||
@@ -834,12 +1572,14 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       if (group.contains(cell)) continue;
       group.add(cell);
       for (final neighbor in _neighbors(cell, g)) {
-        if (neighbor.color == added.color && !group.contains(neighbor)) {
+        if ((neighbor.color == added.color || neighbor.isMystery) &&
+            !group.contains(neighbor)) {
           pending.add(neighbor);
         }
       }
     }
     if (group.length >= 3) {
+      final mysteryReward = _claimMysteryRewards(group);
       _showPop(group, g);
       _playPopSound(group.length);
       board.removeWhere(group.contains);
@@ -847,8 +1587,11 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       if (added.color == CandyColor.lemon) yellowCleared += group.length;
       combo++;
       score += group.length * 10 + math.max(0, combo - 1) * 10;
-      praise = combo > 1 ? 'Combo x$combo! Amazing!' : 'POP! Great shot!';
-      _dropFloating(g);
+      praise =
+          mysteryReward ??
+          (combo > 1 ? 'Combo x$combo! Amazing!' : 'POP! Great shot!');
+      final dropReward = _dropFloating(g);
+      if (dropReward != null) praise = dropReward;
       if (widget.model.haptics) HapticFeedback.mediumImpact();
     } else {
       combo = 0;
@@ -859,10 +1602,123 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       _finish(true);
     } else if (shots <= 0) {
       _finish(false);
+    } else if (widget.config.newRowEnabled && _dangerReached(g)) {
+      praise = 'TOO CLOSE! Clear some candies!';
+      _finish(false);
+    } else {
+      _countShotForIncomingRow();
     }
   }
 
-  void _dropFloating(BoardGeometry g) {
+  void _countShotForIncomingRow() {
+    if (!widget.config.newRowEnabled || rowWarning || rowAnimating) return;
+    rowShotCounter++;
+    if (rowShotCounter < widget.config.newRowInterval) return;
+    _queueIncomingRow();
+  }
+
+  List<CandyCell> _generateCandyRow() => List<CandyCell>.generate(
+    7,
+    (col) => CandyCell(
+      0,
+      col,
+      widget.config.colors[(rowsEntered + col) % widget.config.colors.length],
+    ),
+  );
+
+  void _queueIncomingRow() {
+    incomingRow
+      ..clear()
+      ..addAll(_generateCandyRow());
+    rowWarning = true;
+    aimPath = const [];
+    praise = 'NEW CANDIES!';
+    rowTimer?.cancel();
+    rowTimer = Timer(const Duration(milliseconds: 360), () {
+      if (!mounted || finished) return;
+      setState(() {
+        rowWarning = false;
+        rowAnimating = true;
+      });
+      rowController.forward(from: 0);
+    });
+  }
+
+  void _settleIncomingRow() {
+    final nextBoard = <CandyCell>[
+      ...incomingRow,
+      ...board.map(
+        (cell) => CandyCell(
+          cell.row + 1,
+          cell.col,
+          cell.color,
+          isMystery: cell.isMystery,
+        ),
+      ),
+    ];
+    setState(() {
+      board
+        ..clear()
+        ..addAll(nextBoard);
+      incomingRow.clear();
+      rowAnimating = false;
+      rowShotCounter = 0;
+      rowsEntered++;
+      praise = 'Fresh candy row! Keep popping!';
+      if (widget.model.haptics) HapticFeedback.lightImpact();
+      final geometry = activeGeometry;
+      if (geometry != null && _dangerReached(geometry)) {
+        praise = 'TOO CLOSE! Try again!';
+        _finish(false);
+      }
+    });
+  }
+
+  bool _dangerReached(BoardGeometry g) => board.any(
+    (cell) => g.position(cell).dy + g.ballDiameter / 2 >= g.dangerLine,
+  );
+
+  Future<void> _showRowTutorial() async {
+    if (!mounted || finished) return;
+    setState(() => paused = true);
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('NEW CHALLENGE! 🍬'),
+        content: const Text('New candies can now enter from the top!'),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('GOT IT'),
+          ),
+        ],
+      ),
+    );
+    if (mounted) setState(() => paused = false);
+    await widget.model.markNewRowTutorialSeen();
+  }
+
+  Future<void> _showChallengeIntro() async {
+    if (!mounted || finished) return;
+    await showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(widget.config.challengeTitle!),
+        content: Text(
+          'Clear ${widget.config.target} candies in ${widget.config.shots} shots!',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('LET\'S GO!'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String? _dropFloating(BoardGeometry g) {
     final connected = <CandyCell>[];
     final pending = board.where((cell) => cell.row == 0).toList();
     while (pending.isNotEmpty) {
@@ -875,14 +1731,44 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     }
     final dropped = board.where((cell) => !connected.contains(cell)).toList();
     if (dropped.isNotEmpty) {
+      final mysteryReward = _claimMysteryRewards(dropped);
       board.removeWhere(dropped.contains);
       cleared += dropped.length;
       yellowCleared += dropped
           .where((cell) => cell.color == CandyColor.lemon)
           .length;
       score += dropped.length * 15;
-      praise = 'Sweet drop +${dropped.length * 15}!';
+      return mysteryReward ?? 'Sweet drop +${dropped.length * 15}!';
     }
+    return null;
+  }
+
+  String? _claimMysteryRewards(Iterable<CandyCell> removed) {
+    final mysteries = removed.where((cell) => cell.isMystery).toList();
+    if (mysteries.isEmpty) return null;
+    final rewards = <String>[];
+    for (final _ in mysteries) {
+      switch (random.nextInt(5)) {
+        case 0:
+          final coinsWon = random.nextBool() ? 25 : 50;
+          widget.model.grantMysteryReward(coinsWon: coinsWon);
+          rewards.add('+$coinsWon COINS');
+        case 1:
+          widget.model.grantMysteryReward(booster: BoosterType.bomb);
+          rewards.add('BOMB');
+        case 2:
+          widget.model.grantMysteryReward(booster: BoosterType.rainbow);
+          rewards.add('RAINBOW');
+        case 3:
+          score += 100;
+          rewards.add('+100 BONUS');
+        case 4:
+          combo += 2;
+          score += 30;
+          rewards.add('COMBO +2');
+      }
+    }
+    return 'MYSTERY: ${rewards.join(' + ')}!';
   }
 
   void _showPop(List<CandyCell> candies, BoardGeometry g) {
@@ -905,9 +1791,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     SoundService.instance.playPop(candyCount: candyCount);
   }
 
-  bool get _objectiveDone => board.isEmpty;
-
-  String get _objectiveText => 'Clear all: ${board.length} left';
+  bool get _objectiveDone => widget.config.objective == ObjectiveType.clear
+      ? cleared >= widget.config.target
+      : board.isEmpty;
 
   int get _earnedStars => score >= widget.config.star3
       ? 3
@@ -920,7 +1806,12 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     finished = true;
     won = didWin;
     if (didWin) {
-      await widget.model.finishLevel(widget.config.id, score, _earnedStars);
+      completedChapter = await widget.model.finishLevel(
+        widget.config.id,
+        score,
+        _earnedStars,
+      );
+      chapterComplete = completedChapter != null;
     }
     if (mounted) setState(() {});
   }
@@ -964,9 +1855,21 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   @override
   void dispose() {
     flightTimer?.cancel();
+    rowTimer?.cancel();
     launchController.dispose();
     popController.dispose();
+    rowController.dispose();
     super.dispose();
+  }
+
+  Offset _displayPosition(CandyCell cell, BoardGeometry g) {
+    if (!rowAnimating) return g.position(cell);
+    final target = g.position(CandyCell(cell.row + 1, cell.col, cell.color));
+    return Offset.lerp(
+      g.position(cell),
+      target,
+      Curves.easeOut.transform(rowController.value),
+    )!;
   }
 
   @override
@@ -1000,23 +1903,27 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 18),
+            padding: const EdgeInsets.fromLTRB(14, 6, 14, 10),
             child: Row(
               children: [
                 Expanded(
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    alignment: Alignment.centerLeft,
-                    child: InfoPill(
-                      icon: Icons.track_changes_rounded,
-                      text: _objectiveText,
-                    ),
+                  child: GameStatusCard(
+                    icon: Icons.track_changes_rounded,
+                    label: widget.config.objective == ObjectiveType.clear
+                        ? 'Clear goal'
+                        : 'Clear all',
+                    value: widget.config.objective == ObjectiveType.clear
+                        ? '$cleared / ${widget.config.target}'
+                        : '${board.length} left',
                   ),
                 ),
                 const SizedBox(width: 8),
-                InfoPill(
-                  icon: Icons.auto_awesome_rounded,
-                  text: '$shots shots',
+                Expanded(
+                  child: GameStatusCard(
+                    icon: Icons.auto_awesome_rounded,
+                    label: 'Shots',
+                    value: '$shots',
+                  ),
                 ),
               ],
             ),
@@ -1025,11 +1932,24 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
             child: LayoutBuilder(
               builder: (_, constraints) {
                 final g = BoardGeometry(constraints.biggest);
+                activeGeometry = g;
                 final candySize = g.ballDiameter;
+                final availableBoosters = BoosterType.values
+                    .where(
+                      (type) =>
+                          type != BoosterType.extraSwap &&
+                          widget.model.boosterCount(type) > 0,
+                    )
+                    .toList();
+                final shownBooster = availableBoosters.isEmpty
+                    ? null
+                    : availableBoosters.first;
                 return GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTapDown: (details) => _updateAim(details.localPosition, g),
-                  onTapUp: (details) => _shoot(details.localPosition, g),
+                  onTapUp: (details) => activeBooster == null
+                      ? _shoot(details.localPosition, g)
+                      : _useTargetedBooster(details.localPosition, g),
                   onPanStart: (details) => _updateAim(details.localPosition, g),
                   onPanUpdate: (details) =>
                       _updateAim(details.localPosition, g),
@@ -1041,14 +1961,136 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                       Positioned.fill(
                         child: CustomPaint(painter: AimPainter(path: aimPath)),
                       ),
-                      ...board.map((cell) {
-                        final position = g.position(cell);
-                        return Positioned(
-                          left: position.dx - candySize / 2,
-                          top: position.dy - candySize / 2,
-                          child: CandyBall(color: cell.color, size: candySize),
-                        );
-                      }),
+                      if (widget.config.newRowEnabled)
+                        Positioned(
+                          left: g.wallLeft,
+                          right: g.size.width - g.wallRight,
+                          top: g.dangerLine - 17,
+                          child: IgnorePointer(
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Container(
+                                    height: 3,
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xffff6b9b),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                  ),
+                                ),
+                                Container(
+                                  margin: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 13,
+                                    vertical: 6,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xfff6538a),
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(
+                                      color: const Color(0xffffb6d1),
+                                      width: 1.5,
+                                    ),
+                                  ),
+                                  child: const Text(
+                                    'DANGER ZONE',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 10,
+                                      letterSpacing: .4,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                ),
+                                Expanded(
+                                  child: Container(
+                                    height: 3,
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xffff6b9b),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      AnimatedBuilder(
+                        animation: rowController,
+                        builder: (_, __) => Stack(
+                          children: [
+                            ...board.map((cell) {
+                              final position = _displayPosition(cell, g);
+                              return Positioned(
+                                left: position.dx - candySize / 2,
+                                top: position.dy - candySize / 2,
+                                child: cell.isMystery
+                                    ? MysteryCandy(size: candySize)
+                                    : CandyBall(
+                                        color: cell.color,
+                                        size: candySize,
+                                      ),
+                              );
+                            }),
+                            if (rowAnimating)
+                              ...incomingRow.map((cell) {
+                                final target = g.position(cell);
+                                final progress = Curves.easeOut.transform(
+                                  rowController.value,
+                                );
+                                final position = Offset.lerp(
+                                  target - Offset(0, g.rowStep),
+                                  target,
+                                  progress,
+                                )!;
+                                return Positioned(
+                                  left: position.dx - candySize / 2,
+                                  top: position.dy - candySize / 2,
+                                  child: cell.isMystery
+                                      ? MysteryCandy(size: candySize)
+                                      : CandyBall(
+                                          color: cell.color,
+                                          size: candySize,
+                                        ),
+                                );
+                              }),
+                          ],
+                        ),
+                      ),
+                      if (rowWarning || rowAnimating)
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          top: math.max(4, g.top - 12),
+                          child: IgnorePointer(
+                            child: Center(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 7,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xfff65371),
+                                  borderRadius: BorderRadius.circular(18),
+                                  border: Border.all(
+                                    color: Colors.white,
+                                    width: 2,
+                                  ),
+                                ),
+                                child: const Text(
+                                  '⚠ NEW CANDIES!',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                       ...popEffects.map(
                         (effect) => Positioned(
                           left: effect.position.dx - effect.size / 2,
@@ -1091,9 +2133,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                               height: diameter,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
-                                color: (flyingColor ?? current).color.withValues(
-                                  alpha: fade * .55,
-                                ),
+                                color: (flyingColor ?? current).color
+                                    .withValues(alpha: fade * .55),
                                 boxShadow: [
                                   BoxShadow(
                                     color: Colors.white.withValues(
@@ -1130,22 +2171,38 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                           ),
                         ),
                       Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 6,
-                        child: Text(
-                          praise,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w900,
-                            fontSize: 15,
+                        left: 24,
+                        right: 24,
+                        bottom: 8,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 12,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(
+                              0xff9b5ad0,
+                            ).withValues(alpha: .9),
+                            borderRadius: BorderRadius.circular(24),
+                            border: Border.all(
+                              color: const Color(0xffffb3d1),
+                              width: 2,
+                            ),
+                          ),
+                          child: Text(
+                            praise,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w900,
+                              fontSize: 16,
+                            ),
                           ),
                         ),
                       ),
                       Positioned(
                         left: g.launcher.dx - candySize * .68,
-                        bottom: 18,
+                        bottom: 72,
                         child: AnimatedBuilder(
                           animation: launchController,
                           builder: (_, child) {
@@ -1169,20 +2226,42 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                         ),
                       ),
                       Positioned(
-                        right: 17,
-                        bottom: 26,
-                        child: Column(
-                          children: [
-                            const Text(
-                              'NEXT',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w900,
+                        right: 14,
+                        bottom: 88,
+                        child: CandySlotCard(
+                          label: 'NEXT',
+                          onTap: _swapNextCandy,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              CandyBall(color: next, size: candySize * .72),
+                              const SizedBox(height: 2),
+                              Text(
+                                freeSwaps > 0
+                                    ? 'FREE SWAP'
+                                    : 'SWAPS ×${widget.model.extraSwapBoosters}',
+                                style: const TextStyle(
+                                  color: Color(0xfff6538a),
+                                  fontSize: 8,
+                                  fontWeight: FontWeight.w900,
+                                ),
                               ),
-                            ),
-                            CandyBall(color: next, size: candySize * .76),
-                          ],
+                            ],
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        left: 14,
+                        bottom: 88,
+                        child: BoosterSlotCard(
+                          type: shownBooster,
+                          count: shownBooster == null
+                              ? 0
+                              : widget.model.boosterCount(shownBooster),
+                          selected: activeBooster == shownBooster,
+                          onTap: shownBooster == null
+                              ? null
+                              : () => _selectBooster(shownBooster),
                         ),
                       ),
                       if (finished)
@@ -1190,8 +2269,21 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                           won: won,
                           candiesCleared: cleared,
                           stars: _earnedStars,
+                          chapterName: chapterComplete
+                              ? completedChapter!.name.toUpperCase()
+                              : null,
+                          chapterReward: chapterComplete
+                              ? '${completedChapter!.reward.emoji} ${completedChapter!.reward.label.toUpperCase()} ×${completedChapter!.rewardAmount}\n🪙 +${completedChapter!.coinReward} COINS'
+                              : null,
                           onPrimary: won
-                              ? widget.onNext
+                              ? chapterComplete
+                                    ? () async {
+                                        await widget.model.claimChapterReward(
+                                          completedChapter!,
+                                        );
+                                        widget.onExit();
+                                      }
+                                    : widget.onNext
                               : () => setState(_newLevel),
                           onSecondary: widget.onExit,
                         ),
@@ -1247,6 +2339,8 @@ class ResultOverlay extends StatelessWidget {
     required this.won,
     required this.candiesCleared,
     required this.stars,
+    this.chapterName,
+    this.chapterReward,
     required this.onPrimary,
     required this.onSecondary,
   });
@@ -1254,6 +2348,8 @@ class ResultOverlay extends StatelessWidget {
   final bool won;
   final int candiesCleared;
   final int stars;
+  final String? chapterName;
+  final String? chapterReward;
   final VoidCallback onPrimary;
   final VoidCallback onSecondary;
 
@@ -1264,16 +2360,23 @@ class ResultOverlay extends StatelessWidget {
       child: Center(
         child: Container(
           margin: const EdgeInsets.all(24),
-          padding: const EdgeInsets.all(24),
+          constraints: const BoxConstraints(maxWidth: 360),
+          padding: const EdgeInsets.fromLTRB(24, 30, 24, 22),
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(30),
+            border: Border.all(color: const Color(0xffffd7e4), width: 2),
           ),
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.center,
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                won ? 'LEVEL COMPLETE!' : 'Almost there!',
+                chapterName != null
+                    ? '🎉 CHAPTER COMPLETE!'
+                    : won
+                    ? 'LEVEL COMPLETE!'
+                    : 'Almost there!',
                 style: TextStyle(
                   color: won
                       ? const Color(0xffe75a84)
@@ -1281,13 +2384,22 @@ class ResultOverlay extends StatelessWidget {
                   fontSize: 26,
                   fontWeight: FontWeight.w900,
                 ),
+                textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 4),
+              const SizedBox(height: 10),
               Text(
-                won
+                chapterName != null
+                    ? '$chapterName\n10 LEVELS COMPLETE'
+                    : won
                     ? 'Awesome! You made it sweet.'
                     : 'Try again \u2014 you are close!',
-                style: const TextStyle(fontWeight: FontWeight.w600),
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Color(0xff4d3c54),
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                  height: 1.35,
+                ),
               ),
               const SizedBox(height: 14),
               won
@@ -1299,19 +2411,38 @@ class ResultOverlay extends StatelessWidget {
                     ),
               Text(
                 'Candies cleared: $candiesCleared',
+                textAlign: TextAlign.center,
                 style: const TextStyle(
                   fontSize: 18,
                   fontWeight: FontWeight.w900,
                 ),
               ),
+              if (chapterReward != null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  chapterReward!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xff684e67),
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ],
               const SizedBox(height: 16),
               PrimaryButton(
-                label: won ? 'NEXT LEVEL' : 'TRY AGAIN',
+                label: won
+                    ? chapterName != null
+                          ? 'CLAIM REWARD'
+                          : 'NEXT LEVEL'
+                    : 'TRY AGAIN',
                 onTap: onPrimary,
               ),
               TextButton(
                 onPressed: onSecondary,
-                child: Text(won ? 'LEVEL MAP' : 'BACK TO MAP'),
+                child: Text(
+                  won ? 'LEVEL MAP' : 'BACK TO MAP',
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
               ),
             ],
           ),
@@ -1334,6 +2465,68 @@ class SettingsScreen extends StatelessWidget {
         padding: const EdgeInsets.all(20),
         children: [
           PageHeader(title: 'SETTINGS', onBack: onBack),
+          StreamBuilder(
+            stream: model.auth.authState,
+            builder: (context, snapshot) {
+              final user = snapshot.data;
+              final signedIn = user != null;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Panel(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.person_rounded,
+                            color: Color(0xfff6538a),
+                          ),
+                          const SizedBox(width: 8),
+                          const Text(
+                            'ACCOUNT',
+                            style: TextStyle(
+                              color: Color(0xff654486),
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        signedIn
+                            ? (user.email ?? 'Signed in player')
+                            : 'Playing as a guest',
+                        style: const TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: signedIn
+                            ? OutlinedButton.icon(
+                                onPressed: () => _confirmLogout(context),
+                                icon: const Icon(Icons.logout_rounded),
+                                label: const Text('LOG OUT'),
+                              )
+                            : FilledButton.icon(
+                                onPressed: () {
+                                  Navigator.of(context).push<void>(
+                                    MaterialPageRoute<void>(
+                                      builder: (_) =>
+                                          AuthScreen(onSignedIn: onBack),
+                                    ),
+                                  );
+                                },
+                                icon: const Icon(Icons.login_rounded),
+                                label: const Text('SIGN IN / CREATE ACCOUNT'),
+                              ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
           Panel(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -1354,6 +2547,16 @@ class SettingsScreen extends StatelessWidget {
                   onChanged: (value) => model.updateSettings(haptics: value),
                 ),
                 const SizedBox(height: 18),
+                OutlinedButton.icon(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const HowToPlayScreen(),
+                    ),
+                  ),
+                  icon: const Icon(Icons.help_outline_rounded),
+                  label: const Text('HOW TO PLAY'),
+                ),
+                const SizedBox(height: 10),
                 OutlinedButton.icon(
                   onPressed: () => _confirmReset(context),
                   icon: const Icon(Icons.refresh_rounded),
@@ -1389,6 +2592,189 @@ class SettingsScreen extends StatelessWidget {
     );
     if (shouldReset == true) await model.reset();
   }
+
+  Future<void> _confirmLogout(BuildContext context) async {
+    final shouldLogout = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Log out?'),
+        content: const Text('You can sign back in whenever you like.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('CANCEL'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('LOG OUT'),
+          ),
+        ],
+      ),
+    );
+    if (shouldLogout == true) {
+      await model.auth.signOut();
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('You are now playing as a guest.')),
+        );
+      }
+    }
+  }
+}
+
+class HowToPlayScreen extends StatelessWidget {
+  const HowToPlayScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) => GradientScaffold(
+    child: SafeArea(
+      child: Column(
+        children: [
+          PageHeader(
+            title: 'HOW TO PLAY',
+            onBack: () => Navigator.of(context).pop(),
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(24, 0, 24, 14),
+            child: Text(
+              'Pop candies, collect rewards, and clear every level!',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 26),
+              children: const [
+                HowToPlayStep(
+                  number: '1',
+                  icon: Icons.ads_click_rounded,
+                  title: 'AIM AND SHOOT',
+                  text:
+                      'Drag from the launcher to aim. The dotted guide shows where your candy will land.',
+                ),
+                HowToPlayStep(
+                  number: '2',
+                  icon: Icons.bubble_chart_rounded,
+                  title: 'MATCH 3 OR MORE',
+                  text:
+                      'Join three or more candies of the same colour to pop them. Bigger pops make bigger combos!',
+                ),
+                HowToPlayStep(
+                  number: '3',
+                  icon: Icons.swap_horiz_rounded,
+                  title: 'SWAP THE NEXT CANDY',
+                  text:
+                      'Tap NEXT to swap the shooter candy. Each level has one free swap; use Extra Swap tokens after that.',
+                ),
+                HowToPlayStep(
+                  number: '4',
+                  icon: Icons.auto_awesome_rounded,
+                  title: 'USE BOOSTERS',
+                  text:
+                      'Bomb, Rainbow, Lightning, and Golden Aim help when the board gets tricky. Buy more in the Shop.',
+                ),
+                HowToPlayStep(
+                  number: '5',
+                  icon: Icons.warning_amber_rounded,
+                  title: 'STAY ABOVE THE DANGER LINE',
+                  text:
+                      'From Level 11, new rows may enter from the top. Clear candies before they reach the danger zone.',
+                ),
+                HowToPlayStep(
+                  number: '6',
+                  icon: Icons.question_mark_rounded,
+                  title: 'FIND MYSTERY CANDY',
+                  text:
+                      'From Level 51, pop a purple ? candy for a surprise: coins, boosters, a score bonus, or a combo boost.',
+                ),
+                HowToPlayStep(
+                  number: '7',
+                  icon: Icons.emoji_events_rounded,
+                  title: 'CLEAR THE LEVEL',
+                  text:
+                      'Finish the level goal before your shots run out. Earn stars, coins, boosters, and climb the ranks!',
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class HowToPlayStep extends StatelessWidget {
+  const HowToPlayStep({
+    super.key,
+    required this.number,
+    required this.icon,
+    required this.title,
+    required this.text,
+  });
+
+  final String number;
+  final IconData icon;
+  final String title;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: Panel(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            alignment: Alignment.center,
+            decoration: const BoxDecoration(
+              color: Color(0xffffd363),
+              shape: BoxShape.circle,
+            ),
+            child: Text(
+              number,
+              style: const TextStyle(
+                color: Color(0xff654486),
+                fontWeight: FontWeight.w900,
+                fontSize: 18,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(icon, color: const Color(0xfff6538a), size: 21),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        title,
+                        style: const TextStyle(
+                          color: Color(0xff654486),
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+                Text(text, style: const TextStyle(fontSize: 12)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 class CollectionScreen extends StatelessWidget {
@@ -1421,6 +2807,22 @@ class CollectionScreen extends StatelessWidget {
               ),
             ),
           ),
+          FilledButton.icon(
+            onPressed: () => showDialog<void>(
+              context: context,
+              builder: (_) => LuckySpinDialog(model: model),
+            ),
+            icon: const Icon(Icons.casino_rounded),
+            label: const Text('LUCKY SPIN'),
+          ),
+          Text(
+            'Boosters  💣 ${model.bombBoosters}   🌈 ${model.rainbowBoosters}',
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 8),
           Expanded(
             child: GridView.count(
               padding: const EdgeInsets.all(22),
@@ -1455,6 +2857,615 @@ class CollectionScreen extends StatelessWidget {
       ),
     ),
   );
+}
+
+class LeaderboardScreen extends StatelessWidget {
+  const LeaderboardScreen({
+    super.key,
+    required this.model,
+    required this.onBack,
+    required this.onSignIn,
+  });
+
+  final AppModel model;
+  final VoidCallback onBack;
+  final VoidCallback onSignIn;
+
+  @override
+  Widget build(BuildContext context) {
+    final user = model.auth.currentUser;
+    return GradientScaffold(
+      child: SafeArea(
+        child: Column(
+          children: [
+            PageHeader(
+              title: 'LEADERBOARD',
+              onBack: onBack,
+              trailing: CoinPill(coins: model.coins),
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 0, 20, 14),
+              child: Panel(
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.emoji_events_rounded,
+                      color: Color(0xffffb725),
+                      size: 38,
+                    ),
+                    SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'THIS WEEK',
+                            style: TextStyle(
+                              color: Color(0xff654486),
+                              fontSize: 17,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          SizedBox(height: 2),
+                          Text(
+                            'Your best completed-level score counts.',
+                            style: TextStyle(fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (user == null)
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Panel(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.lock_outline_rounded,
+                          color: Color(0xfff6538a),
+                          size: 52,
+                        ),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'SIGN IN TO JOIN',
+                          style: TextStyle(
+                            color: Color(0xff654486),
+                            fontWeight: FontWeight.w900,
+                            fontSize: 18,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Create an account to submit scores and see this week’s Candy Shooter ranks.',
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 18),
+                        FilledButton.icon(
+                          onPressed: onSignIn,
+                          icon: const Icon(Icons.login_rounded),
+                          label: const Text('GO TO SIGN IN'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              )
+            else
+              Expanded(
+                child: StreamBuilder<List<WeeklyLeaderboardEntry>>(
+                  stream: model.leaderboard.watchTop(),
+                  builder: (context, snapshot) {
+                    if (snapshot.hasError) {
+                      return const _LeaderboardMessage(
+                        icon: Icons.cloud_off_rounded,
+                        title: 'LEADERBOARD UNAVAILABLE',
+                        message: 'Please check your connection and try again.',
+                      );
+                    }
+                    if (!snapshot.hasData) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+                    final entries = snapshot.data!;
+                    return StreamBuilder<WeeklyLeaderboardEntry?>(
+                      stream: model.leaderboard.watchPlayer(user.uid),
+                      builder: (context, playerSnapshot) {
+                        final ownEntry = playerSnapshot.data;
+                        final visiblePlayer = entries.any(
+                          (entry) => entry.uid == user.uid,
+                        );
+                        return ListView(
+                          padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+                          children: [
+                            if (entries.isEmpty)
+                              const _LeaderboardMessage(
+                                icon: Icons.auto_awesome_rounded,
+                                title: 'BE THE FIRST!',
+                                message:
+                                    'Finish a level to set this week’s first score.',
+                              )
+                            else
+                              ...entries.indexed.map(
+                                (item) => Padding(
+                                  padding: const EdgeInsets.only(bottom: 9),
+                                  child: LeaderboardRankCard(
+                                    rank: item.$1 + 1,
+                                    entry: item.$2,
+                                    isCurrentPlayer: item.$2.uid == user.uid,
+                                  ),
+                                ),
+                              ),
+                            if (ownEntry != null && !visiblePlayer) ...[
+                              const Padding(
+                                padding: EdgeInsets.fromLTRB(4, 12, 4, 8),
+                                child: Text(
+                                  'YOUR WEEKLY BEST',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                              ),
+                              LeaderboardRankCard(
+                                rank: null,
+                                entry: ownEntry,
+                                isCurrentPlayer: true,
+                              ),
+                            ],
+                          ],
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LeaderboardMessage extends StatelessWidget {
+  const _LeaderboardMessage({
+    required this.icon,
+    required this.title,
+    required this.message,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(20),
+      child: Panel(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: const Color(0xfff6538a), size: 48),
+            const SizedBox(height: 12),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Color(0xff654486),
+                fontWeight: FontWeight.w900,
+                fontSize: 17,
+              ),
+            ),
+            const SizedBox(height: 7),
+            Text(message, textAlign: TextAlign.center),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+class LeaderboardRankCard extends StatelessWidget {
+  const LeaderboardRankCard({
+    super.key,
+    required this.rank,
+    required this.entry,
+    required this.isCurrentPlayer,
+  });
+
+  final int? rank;
+  final WeeklyLeaderboardEntry entry;
+  final bool isCurrentPlayer;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+    decoration: BoxDecoration(
+      color: isCurrentPlayer
+          ? const Color(0xffffde79)
+          : Colors.white.withValues(alpha: .94),
+      borderRadius: BorderRadius.circular(18),
+      border: Border.all(
+        color: isCurrentPlayer
+            ? const Color(0xffffb725)
+            : const Color(0xffffd5eb),
+        width: 2,
+      ),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x22003583),
+          offset: Offset(0, 3),
+          blurRadius: 0,
+        ),
+      ],
+    ),
+    child: Row(
+      children: [
+        SizedBox(
+          width: 38,
+          child: Text(
+            rank == null ? 'YOU' : '#$rank',
+            style: const TextStyle(
+              color: Color(0xff654486),
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+        if (rank != null && rank! <= 3)
+          Icon(
+            rank == 1 ? Icons.workspace_premium_rounded : Icons.star_rounded,
+            color: rank == 1
+                ? const Color(0xffffb725)
+                : const Color(0xfff6538a),
+            size: 23,
+          )
+        else
+          const Icon(Icons.person_rounded, color: Color(0xff8d76aa), size: 23),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Text(
+            isCurrentPlayer ? 'You' : entry.name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Color(0xff4e385a),
+              fontWeight: FontWeight.w900,
+              fontSize: 16,
+            ),
+          ),
+        ),
+        const Icon(
+          Icons.emoji_events_rounded,
+          color: Color(0xffffb725),
+          size: 19,
+        ),
+        const SizedBox(width: 4),
+        Text(
+          '${entry.score}',
+          style: const TextStyle(
+            color: Color(0xff654486),
+            fontWeight: FontWeight.w900,
+            fontSize: 16,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class BoosterShopScreen extends StatelessWidget {
+  const BoosterShopScreen({
+    super.key,
+    required this.model,
+    required this.onBack,
+  });
+
+  final AppModel model;
+  final VoidCallback onBack;
+
+  static const offers = <ShopOffer>[
+    ShopOffer(
+      type: BoosterType.bomb,
+      price: 100,
+      icon: Icons.local_fire_department_rounded,
+      color: Color(0xff75536c),
+      description: 'Pop candies in a small area.',
+    ),
+    ShopOffer(
+      type: BoosterType.rainbow,
+      price: 150,
+      icon: Icons.auto_awesome_rounded,
+      color: Color(0xff7b5bd1),
+      description: 'Pop every candy of one colour.',
+    ),
+    ShopOffer(
+      type: BoosterType.lightning,
+      price: 200,
+      icon: Icons.bolt_rounded,
+      color: Color(0xffffad22),
+      description: 'Clear a whole candy row.',
+    ),
+    ShopOffer(
+      type: BoosterType.goldenAim,
+      price: 100,
+      icon: Icons.gps_fixed_rounded,
+      color: Color(0xfff6538a),
+      description: 'Show a precise guide for 3 shots.',
+    ),
+    ShopOffer(
+      type: BoosterType.extraSwap,
+      price: 75,
+      icon: Icons.swap_horiz_rounded,
+      color: Color(0xff58aeed),
+      description: 'Swap the shooter and next candy again.',
+    ),
+  ];
+
+  @override
+  Widget build(BuildContext context) => GradientScaffold(
+    child: SafeArea(
+      child: Column(
+        children: [
+          PageHeader(
+            title: 'BOOSTER SHOP',
+            onBack: onBack,
+            trailing: CoinPill(coins: model.coins),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 14),
+            child: Panel(
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.shopping_bag_rounded,
+                    color: Color(0xfff6538a),
+                    size: 36,
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'SWEET POWER-UPS',
+                          style: TextStyle(
+                            color: Color(0xff654486),
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        SizedBox(height: 3),
+                        Text(
+                          'Spend coins earned while popping candies.',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Expanded(
+            child: ListView.separated(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+              itemCount: offers.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 12),
+              itemBuilder: (context, index) {
+                final offer = offers[index];
+                return ShopOfferCard(
+                  offer: offer,
+                  count: model.boosterCount(offer.type),
+                  affordable: model.coins >= offer.price,
+                  onBuy: () async {
+                    final bought = await model.buyBooster(
+                      offer.type,
+                      offer.price,
+                    );
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          bought
+                              ? '${offer.type.label} added to your boosters!'
+                              : 'You need ${offer.price} coins for ${offer.type.label}.',
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class ShopOffer {
+  const ShopOffer({
+    required this.type,
+    required this.price,
+    required this.icon,
+    required this.color,
+    required this.description,
+  });
+
+  final BoosterType type;
+  final int price;
+  final IconData icon;
+  final Color color;
+  final String description;
+}
+
+class ShopOfferCard extends StatelessWidget {
+  const ShopOfferCard({
+    super.key,
+    required this.offer,
+    required this.count,
+    required this.affordable,
+    required this.onBuy,
+  });
+
+  final ShopOffer offer;
+  final int count;
+  final bool affordable;
+  final VoidCallback onBuy;
+
+  @override
+  Widget build(BuildContext context) => Panel(
+    child: Row(
+      children: [
+        Container(
+          width: 54,
+          height: 54,
+          decoration: BoxDecoration(
+            color: offer.color.withValues(alpha: .16),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(offer.icon, color: offer.color, size: 31),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                offer.type.label,
+                style: const TextStyle(
+                  color: Color(0xff654486),
+                  fontWeight: FontWeight.w900,
+                  fontSize: 16,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(offer.description, style: const TextStyle(fontSize: 11)),
+              const SizedBox(height: 5),
+              Text(
+                'YOU HAVE ×$count',
+                style: const TextStyle(
+                  color: Color(0xfff6538a),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        FilledButton(
+          onPressed: affordable ? onBuy : null,
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xfff6538a),
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('BUY', style: TextStyle(fontWeight: FontWeight.w900)),
+              Text(
+                '${offer.price}',
+                style: const TextStyle(fontWeight: FontWeight.w900),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class LuckySpinDialog extends StatefulWidget {
+  const LuckySpinDialog({super.key, required this.model});
+  final AppModel model;
+  @override
+  State<LuckySpinDialog> createState() => _LuckySpinDialogState();
+}
+
+class _LuckySpinDialogState extends State<LuckySpinDialog>
+    with SingleTickerProviderStateMixin {
+  late final controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  );
+  String? reward;
+  Future<void> _spin() async {
+    if (!widget.model.canLuckySpin || controller.isAnimating) return;
+    controller.forward(from: 0);
+    final won = await widget.model.luckySpin();
+    await Future<void>.delayed(const Duration(milliseconds: 1100));
+    if (mounted) setState(() => reward = won);
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('🎡 LUCKY SPIN', textAlign: TextAlign.center),
+    content: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AnimatedBuilder(
+          animation: controller,
+          builder: (_, child) => Transform.rotate(
+            angle: controller.value * math.pi * 8,
+            child: child,
+          ),
+          child: Container(
+            width: 170,
+            height: 170,
+            alignment: Alignment.center,
+            decoration: const BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: SweepGradient(
+                colors: [
+                  Color(0xffffd24b),
+                  Color(0xfff6538a),
+                  Color(0xff8b5bd3),
+                  Color(0xff55d69a),
+                  Color(0xffffd24b),
+                ],
+              ),
+            ),
+            child: const Text(
+              '🪙\n💣  🌈\n⚡',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 30),
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        Text(
+          reward == null
+              ? (widget.model.canLuckySpin
+                    ? 'One free spin today!'
+                    : 'Come back tomorrow!')
+              : 'YOU GOT: $reward!',
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontWeight: FontWeight.w900),
+        ),
+      ],
+    ),
+    actions: [
+      FilledButton(
+        onPressed: reward != null || !widget.model.canLuckySpin
+            ? () => Navigator.pop(context)
+            : _spin,
+        child: Text(
+          reward != null || !widget.model.canLuckySpin ? 'DONE' : 'SPIN',
+        ),
+      ),
+    ],
+  );
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
 }
 
 const _sky = BoxDecoration(
@@ -1899,6 +3910,45 @@ class CandyBall extends StatelessWidget {
   );
 }
 
+class MysteryCandy extends StatelessWidget {
+  const MysteryCandy({super.key, required this.size});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: size,
+    height: size,
+    alignment: Alignment.center,
+    decoration: BoxDecoration(
+      shape: BoxShape.circle,
+      gradient: const LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [Color(0xffb779f2), Color(0xff6f4ac5)],
+      ),
+      border: Border.all(color: Colors.white, width: math.max(1, size * .045)),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x66593a9c),
+          offset: Offset(0, 3),
+          blurRadius: 0,
+        ),
+      ],
+    ),
+    child: Text(
+      '?',
+      style: TextStyle(
+        color: Colors.white,
+        fontSize: size * .62,
+        height: 1,
+        fontWeight: FontWeight.w900,
+        shadows: const [Shadow(color: Color(0x66000000), offset: Offset(0, 2))],
+      ),
+    ),
+  );
+}
+
 class PopCandyEffect extends StatelessWidget {
   const PopCandyEffect({
     super.key,
@@ -2031,6 +4081,18 @@ class CandyMarkPainter extends CustomPainter {
           ..lineTo(size.width * .05, center.dy)
           ..close();
         canvas.drawPath(diamond, paint);
+      case CandyColor.grape:
+        for (final offset in const [
+          Offset(-.18, -.12),
+          Offset(.18, -.12),
+          Offset(0, .16),
+        ]) {
+          canvas.drawCircle(
+            center + Offset(offset.dx * size.width, offset.dy * size.height),
+            size.width * .19,
+            paint,
+          );
+        }
     }
   }
 
@@ -2362,6 +4424,170 @@ class InfoPill extends StatelessWidget {
           ),
         ),
       ],
+    ),
+  );
+}
+
+class GameStatusCard extends StatelessWidget {
+  const GameStatusCard({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    height: 76,
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+    decoration: BoxDecoration(
+      color: Colors.white.withValues(alpha: .93),
+      borderRadius: BorderRadius.circular(18),
+      border: Border.all(color: const Color(0xffffd7ed), width: 2),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x33003583),
+          offset: Offset(0, 4),
+          blurRadius: 0,
+        ),
+      ],
+    ),
+    child: Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Icon(icon, color: const Color(0xff7949ad), size: 26),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Color(0xff654486),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              Text(
+                value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Color(0xfff6538a),
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class CandySlotCard extends StatelessWidget {
+  const CandySlotCard({
+    super.key,
+    required this.label,
+    required this.child,
+    this.onTap,
+  });
+
+  final String label;
+  final Widget child;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(18),
+    child: Container(
+      width: 76,
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .92),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xffffb3d1), width: 2),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              color: Color(0xff654486),
+              fontSize: 11,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 4),
+          child,
+        ],
+      ),
+    ),
+  );
+}
+
+class BoosterSlotCard extends StatelessWidget {
+  const BoosterSlotCard({
+    super.key,
+    required this.type,
+    required this.count,
+    required this.selected,
+    this.onTap,
+  });
+
+  final BoosterType? type;
+  final int count;
+  final bool selected;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(18),
+    child: Container(
+      width: 66,
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      decoration: BoxDecoration(
+        color: selected
+            ? const Color(0xffffdc68)
+            : Colors.white.withValues(alpha: .92),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xffffb3d1), width: 2),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            type?.label ?? 'BOOST',
+            style: const TextStyle(
+              color: Color(0xff654486),
+              fontSize: 10,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(type?.emoji ?? '🎁', style: const TextStyle(fontSize: 22)),
+          Text(
+            '×$count',
+            style: const TextStyle(
+              color: Color(0xfff6538a),
+              fontSize: 12,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
     ),
   );
 }

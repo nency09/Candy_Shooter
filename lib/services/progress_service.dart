@@ -8,17 +8,36 @@ class ProgressService {
   static const _sound = 'sound';
   static const _music = 'music';
   static const _haptics = 'haptics';
+  static const _bombBoosters = 'bombBoosters';
+  static const _rainbowBoosters = 'rainbowBoosters';
+  static const _lightningBoosters = 'lightningBoosters';
+  static const _goldenAimBoosters = 'goldenAimBoosters';
+  static const _megaBombBoosters = 'megaBombBoosters';
+  static const _extraSwapBoosters = 'extraSwapBoosters';
+  static const _claimedChapterRewards = 'claimedChapterRewards';
+  static const _seenNewRowTutorial = 'seenNewRowTutorial';
+  static const _lastLuckySpin = 'lastLuckySpin';
 
   Future<Map<String, Object>> load() async {
     final p = await SharedPreferences.getInstance();
     return {
       'unlocked': p.getInt(_unlocked) ?? 1,
       'coins': p.getInt(_coins) ?? 125,
-      'stars': p.getStringList(_stars) ?? List.filled(10, '0'),
-      'scores': p.getStringList(_scores) ?? List.filled(10, '0'),
+      'stars': p.getStringList(_stars) ?? List.filled(20, '0'),
+      'scores': p.getStringList(_scores) ?? List.filled(20, '0'),
       'sound': p.getBool(_sound) ?? true,
       'music': p.getBool(_music) ?? true,
       'haptics': p.getBool(_haptics) ?? true,
+      'bombBoosters': p.getInt(_bombBoosters) ?? 0,
+      'rainbowBoosters': p.getInt(_rainbowBoosters) ?? 0,
+      'lightningBoosters': p.getInt(_lightningBoosters) ?? 0,
+      'goldenAimBoosters': p.getInt(_goldenAimBoosters) ?? 0,
+      'megaBombBoosters': p.getInt(_megaBombBoosters) ?? 0,
+      'extraSwapBoosters': p.getInt(_extraSwapBoosters) ?? 0,
+      'claimedChapterRewards':
+          p.getStringList(_claimedChapterRewards) ?? const <String>[],
+      'seenNewRowTutorial': p.getBool(_seenNewRowTutorial) ?? false,
+      'lastLuckySpin': p.getString(_lastLuckySpin) ?? '',
     };
   }
 
@@ -30,6 +49,15 @@ class ProgressService {
     required bool sound,
     required bool music,
     required bool haptics,
+    required int bombBoosters,
+    required int rainbowBoosters,
+    required int lightningBoosters,
+    required int goldenAimBoosters,
+    required int megaBombBoosters,
+    required int extraSwapBoosters,
+    required List<int> claimedChapterRewards,
+    required bool seenNewRowTutorial,
+    required String lastLuckySpin,
   }) async {
     final p = await SharedPreferences.getInstance();
     await Future.wait([
@@ -40,6 +68,18 @@ class ProgressService {
       p.setBool(_sound, sound),
       p.setBool(_music, music),
       p.setBool(_haptics, haptics),
+      p.setInt(_bombBoosters, bombBoosters),
+      p.setInt(_rainbowBoosters, rainbowBoosters),
+      p.setInt(_lightningBoosters, lightningBoosters),
+      p.setInt(_goldenAimBoosters, goldenAimBoosters),
+      p.setInt(_megaBombBoosters, megaBombBoosters),
+      p.setInt(_extraSwapBoosters, extraSwapBoosters),
+      p.setStringList(
+        _claimedChapterRewards,
+        claimedChapterRewards.map((id) => '$id').toList(),
+      ),
+      p.setBool(_seenNewRowTutorial, seenNewRowTutorial),
+      p.setString(_lastLuckySpin, lastLuckySpin),
     ]);
   }
 
@@ -53,6 +93,15 @@ class ProgressService {
       p.remove(_sound),
       p.remove(_music),
       p.remove(_haptics),
+      p.remove(_bombBoosters),
+      p.remove(_rainbowBoosters),
+      p.remove(_lightningBoosters),
+      p.remove(_goldenAimBoosters),
+      p.remove(_megaBombBoosters),
+      p.remove(_extraSwapBoosters),
+      p.remove(_claimedChapterRewards),
+      p.remove(_seenNewRowTutorial),
+      p.remove(_lastLuckySpin),
     ]);
   }
 }

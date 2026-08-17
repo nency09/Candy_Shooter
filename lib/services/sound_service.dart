@@ -15,7 +15,11 @@ class SoundService {
   void playShoot() => _play(_shootAsset, volume: .28);
 
   void playPop({required int candyCount}) {
-    final volume = candyCount >= 6 ? .9 : candyCount >= 4 ? .78 : .68;
+    final volume = candyCount >= 6
+        ? .9
+        : candyCount >= 4
+        ? .78
+        : .68;
     _play(_popAsset, volume: volume);
   }
 

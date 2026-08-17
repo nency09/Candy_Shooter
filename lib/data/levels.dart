@@ -1,104 +1,84 @@
 import '../models/game_models.dart';
 
-const levels = <LevelConfig>[
-  LevelConfig(
-    id: 1,
-    shots: 30,
-    colors: [CandyColor.strawberry, CandyColor.lemon],
-    objective: ObjectiveType.board,
-    target: 0,
-    rows: 3,
-    star2: 110,
-    star3: 180,
-  ),
-  LevelConfig(
-    id: 2,
-    shots: 32,
-    colors: [CandyColor.strawberry, CandyColor.lemon],
-    objective: ObjectiveType.board,
-    target: 0,
-    rows: 4,
-    star2: 170,
-    star3: 250,
-  ),
-  LevelConfig(
-    id: 3,
-    shots: 32,
-    colors: [CandyColor.strawberry, CandyColor.lemon, CandyColor.mint],
-    objective: ObjectiveType.board,
-    target: 0,
-    rows: 4,
-    star2: 230,
-    star3: 330,
-  ),
-  LevelConfig(
-    id: 4,
-    shots: 35,
-    colors: [CandyColor.strawberry, CandyColor.lemon, CandyColor.mint],
-    objective: ObjectiveType.board,
-    target: 0,
-    rows: 5,
-    star2: 420,
-    star3: 560,
-  ),
-  LevelConfig(
-    id: 5,
-    shots: 36,
-    colors: CandyColor.values,
-    objective: ObjectiveType.board,
-    target: 0,
-    rows: 5,
-    star2: 290,
-    star3: 400,
-  ),
-  LevelConfig(
-    id: 6,
-    shots: 36,
-    colors: CandyColor.values,
-    objective: ObjectiveType.board,
-    target: 0,
-    rows: 5,
-    star2: 120,
-    star3: 200,
-  ),
-  LevelConfig(
-    id: 7,
-    shots: 38,
-    colors: CandyColor.values,
-    objective: ObjectiveType.board,
-    target: 0,
-    rows: 5,
-    star2: 350,
-    star3: 480,
-  ),
-  LevelConfig(
-    id: 8,
-    shots: 42,
-    colors: CandyColor.values,
-    objective: ObjectiveType.board,
-    target: 0,
-    rows: 6,
-    star2: 700,
-    star3: 850,
-  ),
-  LevelConfig(
-    id: 9,
-    shots: 42,
-    colors: CandyColor.values,
-    objective: ObjectiveType.board,
-    target: 0,
-    rows: 6,
-    star2: 410,
-    star3: 550,
-  ),
-  LevelConfig(
-    id: 10,
-    shots: 40,
-    colors: CandyColor.values,
-    objective: ObjectiveType.board,
-    target: 0,
-    rows: 5,
-    star2: 420,
-    star3: 580,
-  ),
-];
+final levels = List<LevelConfig>.unmodifiable(
+  List<LevelConfig>.generate(100, (index) {
+    final id = index + 1;
+    final chapter = index ~/ 10;
+    final withinChapter = index % 10;
+    final newRowEnabled = id >= 11;
+    final newRowInterval = !newRowEnabled
+        ? 0
+        : id <= 14
+        ? 5
+        : id <= 18
+        ? 4
+        : id <= 20
+        ? 3
+        : (5 - (chapter ~/ 2)).clamp(2, 4);
+    final colorCount = id < 3
+        ? 2
+        : id < 16
+        ? 3
+        : id < 31
+        ? 4
+        : 5;
+    return LevelConfig(
+      id: id,
+      shots: id == 1
+          ? 30
+          : id == 20
+          ? 20
+          : id == 30
+          ? 22
+          : id == 40
+          ? 20
+          : id == 50
+          ? 25
+          : 32 + chapter * 2 + withinChapter,
+      colors: CandyColor.values.take(colorCount).toList(),
+      objective: id == 20 || id == 30 || id == 40 || id == 50
+          ? ObjectiveType.clear
+          : ObjectiveType.board,
+      target: id == 20
+          ? 40
+          : id == 30
+          ? 50
+          : id == 40
+          ? 35
+          : id == 50
+          ? 60
+          : 0,
+      rows: 3 + (withinChapter ~/ 3).clamp(0, 3),
+      star2: 150 + id * 35,
+      star3: 230 + id * 45,
+      newRowEnabled: newRowEnabled,
+      newRowInterval: newRowInterval,
+      iceCount: id >= 21 && id <= 30
+          ? 2 + (withinChapter ~/ 2)
+          : id >= 36 && id <= 50
+          ? 4
+          : 0,
+      bombCount: id >= 31 && id <= 40
+          ? 1 + (withinChapter ~/ 2)
+          : id >= 45 && id <= 50
+          ? 2
+          : 0,
+      specialCandyTypes: id >= 48
+          ? const ['rainbow', 'striped', 'colorBomb']
+          : id >= 44
+          ? const ['rainbow', 'striped']
+          : id >= 41
+          ? const ['rainbow']
+          : const [],
+      challengeTitle: id == 20
+          ? '🔥 CHALLENGE LEVEL'
+          : id == 30
+          ? '👑 HARD LEVEL'
+          : id == 40
+          ? '💣 BOMB CHALLENGE'
+          : id == 50
+          ? '🏆 CANDY MASTER'
+          : null,
+    );
+  }),
+);

@@ -24,10 +24,10 @@ void main() {
     await tester.tap(find.text('1'));
     await tester.pump();
     expect(find.text('LEVEL 1'), findsOneWidget);
-    expect(find.text('30 shots'), findsOneWidget);
+    expect(find.text('30'), findsOneWidget);
 
     await tester.dragFrom(const Offset(180, 650), const Offset(0, -240));
     await tester.pump(const Duration(milliseconds: 1500));
-    expect(find.text('29 shots'), findsOneWidget);
+    expect(find.text('29'), findsOneWidget);
   });
 }
