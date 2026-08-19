@@ -14,6 +14,7 @@ class LevelConfig {
     required this.star3,
     this.newRowEnabled = false,
     this.newRowInterval = 0,
+    this.initialLayout = const [],
     this.iceCount = 0,
     this.bombCount = 0,
     this.specialCandyTypes = const [],
@@ -30,6 +31,7 @@ class LevelConfig {
   final int star3;
   final bool newRowEnabled;
   final int newRowInterval;
+  final List<List<int?>> initialLayout;
   final int iceCount;
   final int bombCount;
   final List<String> specialCandyTypes;

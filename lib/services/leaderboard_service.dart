@@ -1,5 +1,6 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_core/firebase_core.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import 'supabase_service.dart';
 
 class WeeklyLeaderboardEntry {
   const WeeklyLeaderboardEntry({
@@ -12,35 +13,28 @@ class WeeklyLeaderboardEntry {
   final String name;
   final int score;
 
-  factory WeeklyLeaderboardEntry.fromSnapshot(
-    DocumentSnapshot<Map<String, dynamic>> snapshot,
-  ) {
-    final data = snapshot.data() ?? const <String, dynamic>{};
-    return WeeklyLeaderboardEntry(
-      uid: snapshot.id,
-      name: (data['displayName'] as String?)?.trim().isNotEmpty == true
-          ? (data['displayName'] as String).trim()
-          : 'Candy Player',
-      score: (data['score'] as num?)?.toInt() ?? 0,
-    );
-  }
+  factory WeeklyLeaderboardEntry.fromMap(Map<String, dynamic> data) =>
+      WeeklyLeaderboardEntry(
+        uid: data['user_id'] as String? ?? '',
+        name: (data['display_name'] as String?)?.trim().isNotEmpty == true
+            ? (data['display_name'] as String).trim()
+            : 'Candy Player',
+        score: (data['score'] as num?)?.toInt() ?? 0,
+      );
 }
 
 class LeaderboardService {
-  LeaderboardService({FirebaseFirestore? firestore}) : _firestore = firestore;
+  LeaderboardService({SupabaseClient? client}) : _clientOverride = client;
 
-  final FirebaseFirestore? _firestore;
+  final SupabaseClient? _clientOverride;
 
-  bool get _isAvailable => _firestore != null || Firebase.apps.isNotEmpty;
-
-  FirebaseFirestore get _db {
-    if (!_isAvailable) throw StateError('Firebase has not been initialized.');
-    return _firestore ?? FirebaseFirestore.instance;
-  }
+  bool get _isAvailable =>
+      _clientOverride != null || SupabaseService.isInitialized;
+  SupabaseClient get _client => _clientOverride ?? SupabaseService.client;
 
   static String currentWeekId([DateTime? value]) {
-    final today = value ?? DateTime.now();
-    final date = DateTime(today.year, today.month, today.day);
+    final today = (value ?? DateTime.now()).toUtc();
+    final date = DateTime.utc(today.year, today.month, today.day);
     final monday = date.subtract(
       Duration(days: date.weekday - DateTime.monday),
     );
@@ -48,31 +42,30 @@ class LeaderboardService {
     return '${monday.year}-${twoDigits(monday.month)}-${twoDigits(monday.day)}';
   }
 
-  CollectionReference<Map<String, dynamic>> _playersForWeek(String weekId) =>
-      _db.collection('weeklyLeaderboards').doc(weekId).collection('players');
-
   Stream<List<WeeklyLeaderboardEntry>> watchTop({int limit = 20}) {
     if (!_isAvailable) return Stream.value(const <WeeklyLeaderboardEntry>[]);
-    return _playersForWeek(currentWeekId())
-        .orderBy('score', descending: true)
+    return _client
+        .from('weekly_scores')
+        .stream(primaryKey: ['week_start', 'user_id'])
+        .eq('week_start', currentWeekId())
+        .order('score', ascending: false)
         .limit(limit)
-        .snapshots()
-        .map(
-          (snapshot) =>
-              snapshot.docs.map(WeeklyLeaderboardEntry.fromSnapshot).toList(),
-        );
+        .map((rows) => rows.map(WeeklyLeaderboardEntry.fromMap).toList());
   }
 
   Stream<WeeklyLeaderboardEntry?> watchPlayer(String uid) {
     if (!_isAvailable) return Stream.value(null);
-    return _playersForWeek(currentWeekId())
-        .doc(uid)
-        .snapshots()
-        .map(
-          (snapshot) => snapshot.exists
-              ? WeeklyLeaderboardEntry.fromSnapshot(snapshot)
-              : null,
-        );
+    return _client
+        .from('weekly_scores')
+        .stream(primaryKey: ['week_start', 'user_id'])
+        .eq('week_start', currentWeekId())
+        .map((rows) {
+          final row = rows.cast<Map<String, dynamic>?>().firstWhere(
+            (item) => item?['user_id'] == uid,
+            orElse: () => null,
+          );
+          return row == null ? null : WeeklyLeaderboardEntry.fromMap(row);
+        });
   }
 
   Future<void> submitBestScore({
@@ -81,18 +74,6 @@ class LeaderboardService {
     required int score,
   }) async {
     if (!_isAvailable || score <= 0) return;
-    final player = _playersForWeek(currentWeekId()).doc(uid);
-    await _db.runTransaction((transaction) async {
-      final existing = await transaction.get(player);
-      final previous = (existing.data()?['score'] as num?)?.toInt() ?? 0;
-      if (!existing.exists || score > previous) {
-        transaction.set(player, {
-          'uid': uid,
-          'displayName': displayName,
-          'score': score,
-          'updatedAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true));
-      }
-    });
+    await _client.rpc('submit_weekly_score', params: {'new_score': score});
   }
 }

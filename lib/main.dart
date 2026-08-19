@@ -3,7 +3,6 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:firebase_core/firebase_core.dart';
 
 import 'auth_screen.dart';
 import 'data/levels.dart';
@@ -14,10 +13,11 @@ import 'services/cloud_progress_service.dart';
 import 'services/leaderboard_service.dart';
 import 'services/progress_service.dart';
 import 'services/sound_service.dart';
+import 'services/supabase_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp();
+  await SupabaseService.initialize();
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   runApp(const CandyShooterApp());
 }
@@ -121,8 +121,10 @@ class AppModel extends ChangeNotifier {
   Map<String, Object> _cloudProgressSnapshot() {
     final user = auth.currentUser;
     return {
-      'displayName': user?.displayName?.trim().isNotEmpty == true
-          ? user!.displayName!.trim()
+      'displayName':
+          (user?.userMetadata?['display_name'] as String?)?.trim().isNotEmpty ==
+              true
+          ? (user!.userMetadata!['display_name'] as String).trim()
           : (user?.email?.split('@').first ?? 'Candy Player'),
       'email': user?.email ?? '',
       'unlocked': unlocked,
@@ -147,7 +149,7 @@ class AppModel extends ChangeNotifier {
   void _onAuthChanged() {
     if (!ready) return;
     final user = auth.currentUser;
-    if (user != null) _loadCloudProgress(user.uid);
+    if (user != null) _loadCloudProgress(user.id);
   }
 
   Future<void> _loadCloudProgress(String uid) async {
@@ -250,7 +252,7 @@ class AppModel extends ChangeNotifier {
     final user = auth.currentUser;
     if (user == null || _loadingCloudProgress) return;
     CloudProgressService(
-      user.uid,
+      user.id,
     ).save(_cloudProgressSnapshot()).catchError((_) {});
   }
 
@@ -291,13 +293,14 @@ class AppModel extends ChangeNotifier {
   Future<void> _submitWeeklyScore(int score) async {
     final user = auth.currentUser;
     if (user == null) return;
-    final suppliedName = user.displayName?.trim();
+    final suppliedName = (user.userMetadata?['display_name'] as String?)
+        ?.trim();
     final displayName = suppliedName != null && suppliedName.isNotEmpty
         ? suppliedName
         : (user.email?.split('@').first ?? 'Candy Player');
     try {
       await leaderboard.submitBestScore(
-        uid: user.uid,
+        uid: user.id,
         displayName: displayName,
         score: score,
       );
@@ -496,6 +499,23 @@ class _CandyShooterAppState extends State<CandyShooterApp> {
       theme: ThemeData(
         useMaterial3: true,
         colorSchemeSeed: const Color(0xfff65371),
+        splashFactory: InkSparkle.splashFactory,
+        filledButtonTheme: FilledButtonThemeData(
+          style: ButtonStyle(
+            animationDuration: const Duration(milliseconds: 140),
+            overlayColor: WidgetStatePropertyAll(
+              const Color(0xffffc6dc).withValues(alpha: .34),
+            ),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: ButtonStyle(
+            animationDuration: const Duration(milliseconds: 140),
+            overlayColor: WidgetStatePropertyAll(
+              const Color(0xffffc6dc).withValues(alpha: .28),
+            ),
+          ),
+        ),
       ),
       home: model.ready ? AppShell(model: model) : const SplashScreen(),
     ),
@@ -528,8 +548,7 @@ class _AppShellState extends State<AppShell> {
     });
   }
 
-  @override
-  Widget build(BuildContext context) => switch (page) {
+  Widget _currentPage() => switch (page) {
     AppPage.home => HomeScreen(model: widget.model, go: go),
     AppPage.map => LevelMapScreen(
       model: widget.model,
@@ -552,7 +571,7 @@ class _AppShellState extends State<AppShell> {
     AppPage.leaderboard => LeaderboardScreen(
       model: widget.model,
       onBack: () => go(AppPage.home),
-      onSignIn: () => go(AppPage.settings),
+      onSignIn: () => go(AppPage.home),
     ),
     AppPage.game => GameScreen(
       key: ValueKey(level),
@@ -564,6 +583,28 @@ class _AppShellState extends State<AppShell> {
           : () => go(AppPage.game, selectedLevel: level + 1),
     ),
   };
+
+  @override
+  Widget build(BuildContext context) => AnimatedSwitcher(
+    duration: const Duration(milliseconds: 240),
+    reverseDuration: const Duration(milliseconds: 180),
+    switchInCurve: Curves.easeOutCubic,
+    switchOutCurve: Curves.easeInCubic,
+    transitionBuilder: (child, animation) => FadeTransition(
+      opacity: animation,
+      child: SlideTransition(
+        position: Tween<Offset>(
+          begin: const Offset(.025, 0),
+          end: Offset.zero,
+        ).animate(animation),
+        child: child,
+      ),
+    ),
+    child: KeyedSubtree(
+      key: ValueKey('${page.name}-${page == AppPage.game ? level : ''}'),
+      child: _currentPage(),
+    ),
+  );
 }
 
 class SplashScreen extends StatefulWidget {
@@ -817,7 +858,7 @@ class ChapterTab extends StatelessWidget {
   final VoidCallback? onTap;
 
   @override
-  Widget build(BuildContext context) => InkWell(
+  Widget build(BuildContext context) => Pressable(
     onTap: onTap,
     borderRadius: BorderRadius.circular(20),
     child: Container(
@@ -1084,11 +1125,12 @@ class HomeProgressCard extends StatelessWidget {
 }
 
 class BoardGeometry {
-  BoardGeometry(this.size)
+  BoardGeometry(this.size, {this.gridPhase = 0})
     : worldWidth = math.min(size.width, 400),
       ballDiameter = math.min(math.min(size.width, 400) * .12, 48);
 
   final Size size;
+  final int gridPhase;
   final double worldWidth;
   final double ballDiameter;
 
@@ -1101,10 +1143,11 @@ class BoardGeometry {
   Offset get launcher => Offset(size.width / 2, size.height * .89);
   double get dangerLine => launcher.dy - ballDiameter * 3.05;
 
-  Offset position(CandyCell cell) {
+  Offset position(CandyCell cell, {int? phase}) {
     final first = size.width / 2 - 3 * xStep;
+    final isOffsetRow = (cell.row + (phase ?? gridPhase)).isOdd;
     return Offset(
-      first + (cell.col + (cell.row.isOdd ? .5 : 0)) * xStep,
+      first + (cell.col + (isOffsetRow ? .5 : 0)) * xStep,
       top + cell.row * rowStep,
     );
   }
@@ -1128,6 +1171,20 @@ class PopEffect {
   final Offset position;
   final CandyColor color;
   final double size;
+}
+
+class DropEffect {
+  const DropEffect({
+    required this.position,
+    required this.color,
+    required this.size,
+    required this.delay,
+  });
+
+  final Offset position;
+  final CandyColor color;
+  final double size;
+  final double delay;
 }
 
 class GameScreen extends StatefulWidget {
@@ -1166,10 +1223,19 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           setState(popEffects.clear);
         }
       });
+  late final AnimationController dropController =
+      AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 460),
+      )..addStatusListener((status) {
+        if (status == AnimationStatus.completed && mounted) {
+          setState(dropEffects.clear);
+        }
+      });
   late final AnimationController rowController =
       AnimationController(
         vsync: this,
-        duration: const Duration(milliseconds: 420),
+        duration: const Duration(milliseconds: 360),
       )..addStatusListener((status) {
         if (status == AnimationStatus.completed && mounted) {
           _settleIncomingRow();
@@ -1181,8 +1247,10 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   final List<Offset> shotTrail = [];
   final List<ShotSpark> shotSparks = [];
   final List<PopEffect> popEffects = [];
+  final List<DropEffect> dropEffects = [];
   final List<CandyCell> incomingRow = [];
   Offset? aimInput;
+  Offset? _lastAimSample;
   Offset? flight;
   CandyColor? flyingColor;
   int shots = 0;
@@ -1192,6 +1260,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   int combo = 0;
   int rowShotCounter = 0;
   int rowsEntered = 0;
+  int gridPhase = 0;
   int goldenAimShots = 0;
   int freeSwaps = 1;
   BoosterType? activeBooster;
@@ -1209,7 +1278,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   void initState() {
     super.initState();
     _newLevel();
-    if (widget.config.id == 11 && !widget.model.seenNewRowTutorial) {
+    if (widget.config.newRowEnabled && !widget.model.seenNewRowTutorial) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _showRowTutorial());
     } else if (widget.config.challengeTitle != null) {
       WidgetsBinding.instance.addPostFrameCallback(
@@ -1226,7 +1295,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     board.clear();
     shots = widget.config.shots;
     score = cleared = yellowCleared = combo = 0;
-    rowShotCounter = rowsEntered = 0;
+    rowShotCounter = rowsEntered = gridPhase = 0;
     goldenAimShots = 0;
     freeSwaps = 1;
     activeBooster = null;
@@ -1234,27 +1303,28 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     shotTrail.clear();
     shotSparks.clear();
     popEffects.clear();
+    dropEffects.clear();
     incomingRow.clear();
     aimInput = null;
+    _lastAimSample = null;
     flight = null;
     flyingColor = null;
     rowWarning = rowAnimating = false;
     paused = finished = won = chapterComplete = false;
     completedChapter = null;
     praise = 'Aim for a sweet match!';
-    for (var row = 0; row < widget.config.rows + 1; row++) {
-      final columns = 7 - (row % 2);
-      for (var col = 0; col < columns; col++) {
-        if (row < 2 || random.nextDouble() > .18) {
-          board.add(
-            CandyCell(
-              row,
-              col,
-              widget.config.colors[(row * 3 + col * 2 + widget.config.id) %
-                  widget.config.colors.length],
-            ),
-          );
-        }
+    final layout = widget.config.initialLayout;
+    for (var row = 0; row < layout.length; row++) {
+      for (var col = 0; col < layout[row].length; col++) {
+        final colorIndex = layout[row][col];
+        if (colorIndex == null) continue;
+        board.add(
+          CandyCell(
+            row,
+            col,
+            widget.config.colors[colorIndex % widget.config.colors.length],
+          ),
+        );
       }
     }
     if (widget.config.id >= 51 && board.isNotEmpty) {
@@ -1277,6 +1347,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     current = widget.config.colors.first;
     next = widget.config.colors[1 % widget.config.colors.length];
   }
+
+  int _columnsForRow(int row, {int? phase}) =>
+      7 - ((row + (phase ?? gridPhase)).isOdd ? 1 : 0);
 
   bool _touches(CandyCell first, CandyCell second, BoardGeometry g) =>
       (g.position(first) - g.position(second)).distance < g.ballDiameter * 1.04;
@@ -1301,7 +1374,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     var velocity = initial;
     var point = g.launcher;
     final path = <Offset>[point];
-    for (var step = 0; step < 1000; step++) {
+    for (var step = 0; step < 600; step++) {
       var nextPoint = point + velocity;
       if (nextPoint.dx < g.wallLeft || nextPoint.dx > g.wallRight) {
         path.add(point);
@@ -1324,8 +1397,13 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     if (finished || paused || rowWarning || rowAnimating || flight != null) {
       return;
     }
+    aimInput = point;
+    if (_lastAimSample != null &&
+        (_lastAimSample! - point).distanceSquared < 25) {
+      return;
+    }
+    _lastAimSample = point;
     setState(() {
-      aimInput = point;
       aimPath = _trajectory(point, g);
     });
   }
@@ -1471,6 +1549,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       if (goldenAimShots > 0) goldenAimShots--;
       aimPath = const [];
       aimInput = null;
+      _lastAimSample = null;
       flyingColor = firedColor;
       current = next;
       next = widget.config.colors[random.nextInt(widget.config.colors.length)];
@@ -1537,7 +1616,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   ) {
     final options = <CandyCell>[];
     for (var row = 0; row <= 14; row++) {
-      for (var col = 0; col < 7; col++) {
+      for (var col = 0; col < _columnsForRow(row); col++) {
         if (board.any((cell) => cell.row == row && cell.col == col)) continue;
         final candidate = CandyCell(row, col, firedColor);
         if (row == 0 ||
@@ -1578,7 +1657,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         }
       }
     }
-    if (group.length >= 3) {
+    final matched = group.length >= 3;
+    if (matched) {
       final mysteryReward = _claimMysteryRewards(group);
       _showPop(group, g);
       _playPopSound(group.length);
@@ -1606,7 +1686,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       praise = 'TOO CLOSE! Clear some candies!';
       _finish(false);
     } else {
-      _countShotForIncomingRow();
+      if (!matched) _countShotForIncomingRow();
     }
   }
 
@@ -1618,7 +1698,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   }
 
   List<CandyCell> _generateCandyRow() => List<CandyCell>.generate(
-    7,
+    _columnsForRow(0, phase: gridPhase - 1),
     (col) => CandyCell(
       0,
       col,
@@ -1664,6 +1744,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       rowAnimating = false;
       rowShotCounter = 0;
       rowsEntered++;
+      gridPhase--;
       praise = 'Fresh candy row! Keep popping!';
       if (widget.model.haptics) HapticFeedback.lightImpact();
       final geometry = activeGeometry;
@@ -1732,6 +1813,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     final dropped = board.where((cell) => !connected.contains(cell)).toList();
     if (dropped.isNotEmpty) {
       final mysteryReward = _claimMysteryRewards(dropped);
+      _showDrop(dropped, g);
       board.removeWhere(dropped.contains);
       cleared += dropped.length;
       yellowCleared += dropped
@@ -1784,6 +1866,22 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         ),
       );
     popController.forward(from: 0);
+  }
+
+  void _showDrop(List<CandyCell> candies, BoardGeometry g) {
+    dropEffects
+      ..clear()
+      ..addAll(
+        candies.asMap().entries.map(
+          (entry) => DropEffect(
+            position: g.position(entry.value),
+            color: entry.value.color,
+            size: g.ballDiameter,
+            delay: entry.key * .045,
+          ),
+        ),
+      );
+    dropController.forward(from: 0);
   }
 
   void _playPopSound(int candyCount) {
@@ -1858,13 +1956,17 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     rowTimer?.cancel();
     launchController.dispose();
     popController.dispose();
+    dropController.dispose();
     rowController.dispose();
     super.dispose();
   }
 
   Offset _displayPosition(CandyCell cell, BoardGeometry g) {
     if (!rowAnimating) return g.position(cell);
-    final target = g.position(CandyCell(cell.row + 1, cell.col, cell.color));
+    final target = g.position(
+      CandyCell(cell.row + 1, cell.col, cell.color),
+      phase: gridPhase - 1,
+    );
     return Offset.lerp(
       g.position(cell),
       target,
@@ -1925,13 +2027,28 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                     value: '$shots',
                   ),
                 ),
+                if (widget.config.newRowEnabled) ...[
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: GameStatusCard(
+                      icon: Icons.vertical_align_bottom_rounded,
+                      label: 'Row in',
+                      value: rowWarning || rowAnimating
+                          ? 'NOW!'
+                          : '${math.max(0, widget.config.newRowInterval - rowShotCounter)}',
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
           Expanded(
             child: LayoutBuilder(
               builder: (_, constraints) {
-                final g = BoardGeometry(constraints.biggest);
+                final g = BoardGeometry(
+                  constraints.biggest,
+                  gridPhase: gridPhase,
+                );
                 activeGeometry = g;
                 final candySize = g.ballDiameter;
                 final availableBoosters = BoosterType.values
@@ -2036,7 +2153,10 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                             }),
                             if (rowAnimating)
                               ...incomingRow.map((cell) {
-                                final target = g.position(cell);
+                                final target = g.position(
+                                  cell,
+                                  phase: gridPhase - 1,
+                                );
                                 final progress = Curves.easeOut.transform(
                                   rowController.value,
                                 );
@@ -2057,6 +2177,18 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                                 );
                               }),
                           ],
+                        ),
+                      ),
+                      ...dropEffects.map(
+                        (effect) => Positioned(
+                          left: effect.position.dx - effect.size / 2,
+                          top: effect.position.dy - effect.size / 2,
+                          child: IgnorePointer(
+                            child: FallingCandyEffect(
+                              effect: effect,
+                              animation: dropController,
+                            ),
+                          ),
                         ),
                       ),
                       if (rowWarning || rowAnimating)
@@ -2973,11 +3105,11 @@ class LeaderboardScreen extends StatelessWidget {
                     }
                     final entries = snapshot.data!;
                     return StreamBuilder<WeeklyLeaderboardEntry?>(
-                      stream: model.leaderboard.watchPlayer(user.uid),
+                      stream: model.leaderboard.watchPlayer(user.id),
                       builder: (context, playerSnapshot) {
                         final ownEntry = playerSnapshot.data;
                         final visiblePlayer = entries.any(
-                          (entry) => entry.uid == user.uid,
+                          (entry) => entry.uid == user.id,
                         );
                         return ListView(
                           padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
@@ -2996,7 +3128,7 @@ class LeaderboardScreen extends StatelessWidget {
                                   child: LeaderboardRankCard(
                                     rank: item.$1 + 1,
                                     entry: item.$2,
-                                    isCurrentPlayer: item.$2.uid == user.uid,
+                                    isCurrentPlayer: item.$2.uid == user.id,
                                   ),
                                 ),
                               ),
@@ -3392,19 +3524,27 @@ class _LuckySpinDialogState extends State<LuckySpinDialog>
     with SingleTickerProviderStateMixin {
   late final controller = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 1100),
+    duration: const Duration(milliseconds: 1800),
   );
   String? reward;
   Future<void> _spin() async {
     if (!widget.model.canLuckySpin || controller.isAnimating) return;
     controller.forward(from: 0);
     final won = await widget.model.luckySpin();
-    await Future<void>.delayed(const Duration(milliseconds: 1100));
+    await Future<void>.delayed(const Duration(milliseconds: 1800));
     if (mounted) setState(() => reward = won);
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
+  Widget build(BuildContext context) => LuckySpinLayout(
+    turns: controller,
+    canSpin: widget.model.canLuckySpin,
+    reward: reward,
+    onSpin: _spin,
+    onClose: () => Navigator.pop(context),
+  );
+
+  Widget legacyBuild(BuildContext context) => AlertDialog(
     title: const Text('🎡 LUCKY SPIN', textAlign: TextAlign.center),
     content: Column(
       mainAxisSize: MainAxisSize.min,
@@ -3466,6 +3606,507 @@ class _LuckySpinDialogState extends State<LuckySpinDialog>
     controller.dispose();
     super.dispose();
   }
+}
+
+class LuckySpinLayout extends StatelessWidget {
+  const LuckySpinLayout({
+    super.key,
+    required this.turns,
+    required this.canSpin,
+    required this.reward,
+    required this.onSpin,
+    required this.onClose,
+  });
+
+  final Animation<double> turns;
+  final bool canSpin;
+  final String? reward;
+  final VoidCallback onSpin;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) => Dialog(
+    backgroundColor: Colors.transparent,
+    insetPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 20),
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 460, maxHeight: 720),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(32),
+          gradient: const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xff5f4bb5), Color(0xff9e73dd), Color(0xfff58fbd)],
+          ),
+          border: Border.all(color: const Color(0xffffc7dc), width: 3),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x660b195d),
+              offset: Offset(0, 10),
+              blurRadius: 0,
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(29),
+          child: Stack(
+            children: [
+              const Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(painter: LuckySpinBackgroundPainter()),
+                ),
+              ),
+              SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(18, 8, 18, 18),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: IconButton(
+                        tooltip: 'Close',
+                        onPressed: onClose,
+                        icon: const Icon(Icons.close_rounded),
+                        color: Colors.white,
+                      ),
+                    ),
+                    const LuckySpinRibbon(),
+                    const SizedBox(height: 7),
+                    const Text(
+                      'Spin the wheel and win sweet rewards!',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 14,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    LayoutBuilder(
+                      builder: (_, constraints) => LuckySpinWheel(
+                        size: math.min(constraints.maxWidth, 365),
+                        turns: turns,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 220),
+                      child: Text(
+                        reward != null
+                            ? 'YOU WON: $reward!'
+                            : canSpin
+                            ? '1 FREE SPIN DAILY'
+                            : 'YOUR FREE SPIN IS READY TOMORROW',
+                        key: ValueKey(reward ?? canSpin),
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: reward != null
+                              ? const Color(0xfffff080)
+                              : Colors.white,
+                          fontSize: reward != null ? 19 : 13,
+                          fontWeight: FontWeight.w900,
+                          shadows: const [
+                            Shadow(
+                              color: Color(0x5500337e),
+                              offset: Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: 235,
+                      height: 58,
+                      child: FilledButton(
+                        onPressed: reward != null || !canSpin
+                            ? onClose
+                            : onSpin,
+                        style: FilledButton.styleFrom(
+                          backgroundColor: reward != null || !canSpin
+                              ? const Color(0xff805ca7)
+                              : const Color(0xff62bf2e),
+                          foregroundColor: Colors.white,
+                          elevation: 5,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(28),
+                            side: const BorderSide(
+                              color: Color(0xffd7ff9d),
+                              width: 2,
+                            ),
+                          ),
+                        ),
+                        child: Text(
+                          reward != null || !canSpin ? 'DONE' : 'SPIN',
+                          style: const TextStyle(
+                            fontSize: 25,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.schedule_rounded,
+                          size: 17,
+                          color: Color(0xffffe783),
+                        ),
+                        const SizedBox(width: 5),
+                        Text(
+                          canSpin
+                              ? 'Free spin available now!'
+                              : 'Resets at midnight',
+                          style: const TextStyle(
+                            color: Color(0xffffe783),
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+class LuckySpinRibbon extends StatelessWidget {
+  const LuckySpinRibbon({super.key});
+
+  @override
+  Widget build(BuildContext context) => Stack(
+    alignment: Alignment.center,
+    clipBehavior: Clip.none,
+    children: [
+      Positioned(
+        left: -12,
+        child: Transform.rotate(
+          angle: -.16,
+          child: Container(
+            width: 42,
+            height: 38,
+            color: const Color(0xffd62d78),
+          ),
+        ),
+      ),
+      Positioned(
+        right: -12,
+        child: Transform.rotate(
+          angle: .16,
+          child: Container(
+            width: 42,
+            height: 38,
+            color: const Color(0xffd62d78),
+          ),
+        ),
+      ),
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 8),
+        decoration: BoxDecoration(
+          color: const Color(0xfff34e8b),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: const Color(0xffffa7c4), width: 2),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x55003383),
+              offset: Offset(0, 4),
+              blurRadius: 0,
+            ),
+          ],
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.star_rounded, color: Color(0xffffe259), size: 23),
+            SizedBox(width: 7),
+            Text(
+              'LUCKY SPIN',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 28,
+                fontWeight: FontWeight.w900,
+                letterSpacing: .4,
+                shadows: [
+                  Shadow(color: Color(0x660f286d), offset: Offset(0, 3)),
+                ],
+              ),
+            ),
+            SizedBox(width: 7),
+            Icon(Icons.star_rounded, color: Color(0xffffe259), size: 23),
+          ],
+        ),
+      ),
+    ],
+  );
+}
+
+class LuckySpinWheel extends StatelessWidget {
+  const LuckySpinWheel({super.key, required this.size, required this.turns});
+
+  final double size;
+  final Animation<double> turns;
+
+  static const _prizes = [
+    _LuckyWheelPrize('50\nCOINS', Icons.monetization_on_rounded),
+    _LuckyWheelPrize('100\nCOINS', Icons.monetization_on_rounded),
+    _LuckyWheelPrize('BOMB', Icons.warning_amber_rounded),
+    _LuckyWheelPrize('RAINBOW', Icons.brightness_5_rounded),
+    _LuckyWheelPrize('LIGHTNING', Icons.bolt_rounded),
+    _LuckyWheelPrize('MYSTERY', Icons.card_giftcard_rounded),
+  ];
+
+  @override
+  Widget build(BuildContext context) => SizedBox.square(
+    dimension: size,
+    child: Stack(
+      alignment: Alignment.center,
+      clipBehavior: Clip.none,
+      children: [
+        ...List.generate(12, (index) {
+          final angle = -math.pi / 2 + index * math.pi * 2 / 12;
+          final radius = size * .475;
+          return Positioned(
+            left: size / 2 + math.cos(angle) * radius - 5,
+            top: size / 2 + math.sin(angle) * radius - 5,
+            child: Container(
+              width: 10,
+              height: 10,
+              decoration: const BoxDecoration(
+                color: Color(0xfffff09d),
+                shape: BoxShape.circle,
+                boxShadow: [BoxShadow(color: Color(0xffffd75c), blurRadius: 7)],
+              ),
+            ),
+          );
+        }),
+        AnimatedBuilder(
+          animation: turns,
+          builder: (_, child) => Transform.rotate(
+            angle: Curves.easeOutCubic.transform(turns.value) * math.pi * 12,
+            child: child,
+          ),
+          child: SizedBox.square(
+            dimension: size * .9,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Positioned.fill(
+                  child: CustomPaint(painter: LuckyWheelPainter()),
+                ),
+                for (var index = 0; index < _prizes.length; index++)
+                  _LuckyWheelPrizeLabel(
+                    prize: _prizes[index],
+                    index: index,
+                    diameter: size * .9,
+                  ),
+                Container(
+                  width: size * .22,
+                  height: size * .22,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: const RadialGradient(
+                      colors: [
+                        Color(0xffffd3e0),
+                        Color(0xfff6538a),
+                        Color(0xffc73378),
+                      ],
+                    ),
+                    border: Border.all(color: Colors.white, width: 3),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x66003383),
+                        offset: Offset(0, 4),
+                        blurRadius: 0,
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.casino_rounded,
+                    color: Colors.white,
+                    size: 32,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        Positioned(
+          top: 0,
+          child: Icon(
+            Icons.location_on_rounded,
+            color: const Color(0xffffd84a),
+            size: size * .18,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _LuckyWheelPrize {
+  const _LuckyWheelPrize(this.label, this.icon);
+
+  final String label;
+  final IconData icon;
+}
+
+class _LuckyWheelPrizeLabel extends StatelessWidget {
+  const _LuckyWheelPrizeLabel({
+    required this.prize,
+    required this.index,
+    required this.diameter,
+  });
+
+  final _LuckyWheelPrize prize;
+  final int index;
+  final double diameter;
+
+  @override
+  Widget build(BuildContext context) {
+    final angle = -math.pi / 2 + index * math.pi * 2 / 6;
+    final radius = diameter * .315;
+    final labelSize = diameter * .19;
+    return Positioned(
+      left: diameter / 2 + math.cos(angle) * radius - labelSize / 2,
+      top: diameter / 2 + math.sin(angle) * radius - labelSize / 2,
+      child: SizedBox(
+        width: labelSize,
+        height: labelSize,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(prize.icon, color: Colors.white, size: labelSize * .55),
+            Text(
+              prize.label,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: math.max(8, diameter * .037),
+                height: .98,
+                fontWeight: FontWeight.w900,
+                shadows: const [
+                  Shadow(color: Color(0x88003383), offset: Offset(0, 1)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class LuckyWheelPainter extends CustomPainter {
+  static const _colors = [
+    Color(0xff9552da),
+    Color(0xff228ed4),
+    Color(0xffffc62c),
+    Color(0xffef598d),
+    Color(0xff12aaa8),
+    Color(0xff63b932),
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final radius = size.shortestSide / 2;
+    const slice = math.pi * 2 / 6;
+    final wedge = Paint()..style = PaintingStyle.fill;
+    for (var index = 0; index < 6; index++) {
+      wedge.color = _colors[index];
+      canvas.drawArc(
+        Rect.fromCircle(center: center, radius: radius),
+        -math.pi / 2 - slice / 2 + index * slice,
+        slice,
+        true,
+        wedge,
+      );
+    }
+    final divider = Paint()
+      ..color = Colors.white.withValues(alpha: .82)
+      ..strokeWidth = 2.5
+      ..style = PaintingStyle.stroke;
+    for (var index = 0; index < 6; index++) {
+      final angle = -math.pi / 2 - slice / 2 + index * slice;
+      canvas.drawLine(
+        center,
+        center + Offset(math.cos(angle) * radius, math.sin(angle) * radius),
+        divider,
+      );
+    }
+    final rim = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 8
+      ..shader = const LinearGradient(
+        colors: [Color(0xffffb5d3), Color(0xffe43780), Color(0xffffb5d3)],
+      ).createShader(Rect.fromCircle(center: center, radius: radius));
+    canvas.drawCircle(center, radius - 3, rim);
+    canvas.drawCircle(
+      center,
+      radius + 5,
+      Paint()
+        ..color = const Color(0xfff6538a)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 8,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant LuckyWheelPainter oldDelegate) => false;
+}
+
+class LuckySpinBackgroundPainter extends CustomPainter {
+  const LuckySpinBackgroundPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final sparkle = Paint()..color = Colors.white.withValues(alpha: .23);
+    for (final point in [
+      Offset(size.width * .12, size.height * .19),
+      Offset(size.width * .87, size.height * .29),
+      Offset(size.width * .18, size.height * .73),
+      Offset(size.width * .8, size.height * .82),
+    ]) {
+      canvas.drawCircle(point, 2.5, sparkle);
+      canvas.drawLine(
+        point - const Offset(7, 0),
+        point + const Offset(7, 0),
+        sparkle,
+      );
+      canvas.drawLine(
+        point - const Offset(0, 7),
+        point + const Offset(0, 7),
+        sparkle,
+      );
+    }
+    final hill = Path()
+      ..moveTo(0, size.height)
+      ..quadraticBezierTo(
+        size.width * .2,
+        size.height * .78,
+        size.width * .48,
+        size.height,
+      )
+      ..quadraticBezierTo(
+        size.width * .77,
+        size.height * .74,
+        size.width,
+        size.height * .87,
+      )
+      ..lineTo(size.width, size.height)
+      ..close();
+    canvas.drawPath(hill, Paint()..color = const Color(0x445fc848));
+  }
+
+  @override
+  bool shouldRepaint(covariant LuckySpinBackgroundPainter oldDelegate) => false;
 }
 
 const _sky = BoxDecoration(
@@ -4019,6 +4660,38 @@ class PopCandyEffect extends StatelessWidget {
   );
 }
 
+class FallingCandyEffect extends StatelessWidget {
+  const FallingCandyEffect({
+    super.key,
+    required this.effect,
+    required this.animation,
+  });
+
+  final DropEffect effect;
+  final Animation<double> animation;
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: animation,
+    builder: (_, __) {
+      final progress =
+          ((animation.value - effect.delay) / math.max(.01, 1 - effect.delay))
+              .clamp(0.0, 1.0);
+      final fall = Curves.easeIn.transform(progress);
+      return Opacity(
+        opacity: (1 - fall * .72).clamp(0.0, 1.0),
+        child: Transform.translate(
+          offset: Offset((fall - .5) * effect.size * .3, fall * 155),
+          child: Transform.rotate(
+            angle: fall * .55,
+            child: CandyBall(color: effect.color, size: effect.size),
+          ),
+        ),
+      );
+    },
+  );
+}
+
 class CandyMarkPainter extends CustomPainter {
   const CandyMarkPainter(this.color);
 
@@ -4111,23 +4784,39 @@ class PrimaryButton extends StatelessWidget {
   Widget build(BuildContext context) => SizedBox(
     width: 235,
     height: 62,
-    child: ElevatedButton.icon(
-      onPressed: onTap,
-      icon: const Icon(Icons.play_arrow_rounded, size: 27),
-      label: Text(
-        label,
-        style: const TextStyle(
-          fontSize: 20,
-          fontWeight: FontWeight.w900,
-          letterSpacing: .6,
+    child: Pressable(
+      onTap: onTap,
+      pressedScale: .96,
+      borderRadius: BorderRadius.circular(22),
+      child: Container(
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: const Color(0xfff65080),
+          borderRadius: BorderRadius.circular(22),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0xffa62f59),
+              offset: Offset(0, 5),
+              blurRadius: 0,
+            ),
+          ],
         ),
-      ),
-      style: ElevatedButton.styleFrom(
-        backgroundColor: const Color(0xfff65080),
-        foregroundColor: Colors.white,
-        elevation: 5,
-        shadowColor: const Color(0xffa62f59),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.play_arrow_rounded, size: 27, color: Colors.white),
+            const SizedBox(width: 7),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+                letterSpacing: .6,
+              ),
+            ),
+          ],
+        ),
       ),
     ),
   );
@@ -4166,6 +4855,52 @@ class _PulseButtonState extends State<PulseButton>
   }
 }
 
+class Pressable extends StatefulWidget {
+  const Pressable({
+    super.key,
+    required this.child,
+    required this.onTap,
+    required this.borderRadius,
+    this.pressedScale = .94,
+  });
+
+  final Widget child;
+  final VoidCallback? onTap;
+  final BorderRadius borderRadius;
+  final double pressedScale;
+
+  @override
+  State<Pressable> createState() => _PressableState();
+}
+
+class _PressableState extends State<Pressable> {
+  bool _pressed = false;
+
+  void _setPressed(bool value) {
+    if (widget.onTap == null || _pressed == value) return;
+    setState(() => _pressed = value);
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedScale(
+    scale: _pressed ? widget.pressedScale : 1,
+    duration: const Duration(milliseconds: 90),
+    curve: Curves.easeOutCubic,
+    child: Material(
+      color: Colors.transparent,
+      borderRadius: widget.borderRadius,
+      child: InkWell(
+        onTap: widget.onTap,
+        onTapDown: widget.onTap == null ? null : (_) => _setPressed(true),
+        onTapUp: widget.onTap == null ? null : (_) => _setPressed(false),
+        onTapCancel: () => _setPressed(false),
+        borderRadius: widget.borderRadius,
+        child: widget.child,
+      ),
+    ),
+  );
+}
+
 class RoundIcon extends StatelessWidget {
   const RoundIcon(this.icon, this.onTap, {super.key});
 
@@ -4173,7 +4908,7 @@ class RoundIcon extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => InkWell(
+  Widget build(BuildContext context) => Pressable(
     onTap: onTap,
     borderRadius: BorderRadius.circular(24),
     child: Container(
@@ -4236,7 +4971,7 @@ class MiniNav extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => InkWell(
+  Widget build(BuildContext context) => Pressable(
     onTap: onTap,
     borderRadius: BorderRadius.circular(16),
     child: Container(
@@ -4351,7 +5086,7 @@ class LevelBubble extends StatelessWidget {
   final VoidCallback? onTap;
 
   @override
-  Widget build(BuildContext context) => InkWell(
+  Widget build(BuildContext context) => Pressable(
     onTap: onTap,
     borderRadius: BorderRadius.circular(40),
     child: Container(
@@ -4507,7 +5242,7 @@ class CandySlotCard extends StatelessWidget {
   final VoidCallback? onTap;
 
   @override
-  Widget build(BuildContext context) => InkWell(
+  Widget build(BuildContext context) => Pressable(
     onTap: onTap,
     borderRadius: BorderRadius.circular(18),
     child: Container(
@@ -4552,7 +5287,7 @@ class BoosterSlotCard extends StatelessWidget {
   final VoidCallback? onTap;
 
   @override
-  Widget build(BuildContext context) => InkWell(
+  Widget build(BuildContext context) => Pressable(
     onTap: onTap,
     borderRadius: BorderRadius.circular(18),
     child: Container(

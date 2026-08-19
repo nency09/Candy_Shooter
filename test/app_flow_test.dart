@@ -26,6 +26,13 @@ void main() {
     expect(find.text('LEVEL 1'), findsOneWidget);
     expect(find.text('30'), findsOneWidget);
 
+    await tester.pump(const Duration(milliseconds: 300));
+
+    if (find.text('GOT IT').evaluate().isNotEmpty) {
+      await tester.tap(find.text('GOT IT'));
+      await tester.pumpAndSettle();
+    }
+
     await tester.dragFrom(const Offset(180, 650), const Offset(0, -240));
     await tester.pump(const Duration(milliseconds: 1500));
     expect(find.text('29'), findsOneWidget);

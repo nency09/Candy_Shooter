@@ -38,7 +38,7 @@ class _AuthScreenState extends State<AuthScreen> {
     try {
       if (_creatingAccount) {
         await _auth.signUp(_name.text, _email.text, _password.text);
-        // Firebase signs a new account in automatically. Sign it out again so
+        // Supabase may sign a new account in automatically. Sign it out again so
         // every new player follows the requested sign-up -> sign-in flow.
         await _auth.signOut();
         if (mounted) {
@@ -84,16 +84,20 @@ class _AuthScreenState extends State<AuthScreen> {
 
   String _friendlyError(Object error) {
     final message = error.toString();
-    if (message.contains('invalid-credential')) {
+    if (message.contains('invalid-credential') ||
+        message.contains('invalid login credentials')) {
       return 'That email or password is not correct.';
     }
-    if (message.contains('email-already-in-use')) {
+    if (message.contains('email-already-in-use') ||
+        message.contains('user already registered')) {
       return 'An account already exists with this email.';
     }
-    if (message.contains('weak-password')) {
+    if (message.contains('weak-password') ||
+        message.contains('at least 6 characters')) {
       return 'Use a password with at least 6 characters.';
     }
-    if (message.contains('invalid-email')) {
+    if (message.contains('invalid-email') ||
+        message.contains('unable to validate email')) {
       return 'Enter a valid email address.';
     }
     return 'Unable to continue. Please try again.';

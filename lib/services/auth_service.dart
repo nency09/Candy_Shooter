@@ -1,37 +1,40 @@
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_core/firebase_core.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import 'supabase_service.dart';
 
 class AuthService {
-  AuthService({FirebaseAuth? auth}) : _authOverride = auth;
+  AuthService({SupabaseClient? client}) : _clientOverride = client;
 
-  final FirebaseAuth? _authOverride;
+  final SupabaseClient? _clientOverride;
 
-  bool get _isAvailable => _authOverride != null || Firebase.apps.isNotEmpty;
+  bool get _isAvailable =>
+      _clientOverride != null || SupabaseService.isInitialized;
 
-  FirebaseAuth get _auth {
+  SupabaseClient get _client {
     if (!_isAvailable) {
-      throw StateError('Firebase has not been initialized.');
+      throw StateError('Supabase has not been initialized.');
     }
-    return _authOverride ?? FirebaseAuth.instance;
+    return _clientOverride ?? SupabaseService.client;
   }
 
-  Stream<User?> get authState =>
-      _isAvailable ? _auth.authStateChanges() : Stream<User?>.value(null);
-  User? get currentUser => _isAvailable ? _auth.currentUser : null;
+  Stream<User?> get authState => _isAvailable
+      ? _client.auth.onAuthStateChange.map((event) => event.session?.user)
+      : Stream<User?>.value(null);
+  User? get currentUser => _isAvailable ? _client.auth.currentUser : null;
 
   Future<void> signIn(String email, String password) =>
-      _auth.signInWithEmailAndPassword(email: email.trim(), password: password);
+      _client.auth.signInWithPassword(email: email.trim(), password: password);
 
   Future<void> signUp(String name, String email, String password) async {
-    final credential = await _auth.createUserWithEmailAndPassword(
+    await _client.auth.signUp(
       email: email.trim(),
       password: password,
+      data: {'display_name': name.trim()},
     );
-    await credential.user?.updateDisplayName(name.trim());
   }
 
   Future<void> resetPassword(String email) =>
-      _auth.sendPasswordResetEmail(email: email.trim());
+      _client.auth.resetPasswordForEmail(email.trim());
 
-  Future<void> signOut() => _auth.signOut();
+  Future<void> signOut() => _client.auth.signOut();
 }

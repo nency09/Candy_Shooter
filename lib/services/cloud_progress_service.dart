@@ -1,36 +1,27 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import 'supabase_service.dart';
 
 class CloudProgressService {
-  CloudProgressService(this.uid, {FirebaseFirestore? firestore})
-    : _db = firestore ?? FirebaseFirestore.instance;
+  CloudProgressService(this.uid, {SupabaseClient? client})
+    : _clientOverride = client;
 
   final String uid;
-  final FirebaseFirestore _db;
-  DocumentReference<Map<String, dynamic>> get _profile =>
-      _db.collection('users').doc(uid);
+  final SupabaseClient? _clientOverride;
+
+  SupabaseClient get _client => _clientOverride ?? SupabaseService.client;
 
   Future<Map<String, Object>?> load() async {
-    final snapshot = await _profile.get();
-    if (!snapshot.exists) return null;
-    return Map<String, Object>.from(snapshot.data()!);
+    final profile = await _client
+        .from('profiles')
+        .select('progress')
+        .eq('id', uid)
+        .maybeSingle();
+    final progress = profile?['progress'];
+    return progress is Map ? Map<String, Object>.from(progress) : null;
   }
 
-  Future<void> save(Map<String, Object> progress) => _profile.set({
-    ...progress,
-    'updatedAt': FieldValue.serverTimestamp(),
-  }, SetOptions(merge: true));
-
-  Future<void> createProfile({required String name, required String email}) =>
-      _profile.set({
-        'displayName': name,
-        'email': email,
-        'currentLevel': 1,
-        'coins': 0,
-        'stars': <int>[],
-        'scores': <int>[],
-        'boosters': <String, int>{},
-        'claimedRewards': <int>[],
-        'createdAt': FieldValue.serverTimestamp(),
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+  Future<void> save(Map<String, Object> progress) => _client
+      .from('profiles')
+      .upsert({'id': uid, 'progress': progress}, onConflict: 'id');
 }
