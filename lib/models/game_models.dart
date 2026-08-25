@@ -14,6 +14,9 @@ class LevelConfig {
     required this.star3,
     this.newRowEnabled = false,
     this.newRowInterval = 0,
+    this.newRowSize = 0,
+    this.newRowSpecialChance = 0,
+    this.bombRadius = 1,
     this.initialLayout = const [],
     this.iceCount = 0,
     this.bombCount = 0,
@@ -31,6 +34,15 @@ class LevelConfig {
   final int star3;
   final bool newRowEnabled;
   final int newRowInterval;
+
+  /// Number of candies in an incoming row. Zero means a full logical row.
+  final int newRowSize;
+
+  /// Optional probability for a special mystery candy in an incoming row.
+  final double newRowSpecialChance;
+
+  /// Blast radius measured in logical hex-grid cells.
+  final double bombRadius;
   final List<List<int?>> initialLayout;
   final int iceCount;
   final int bombCount;
@@ -40,13 +52,24 @@ class LevelConfig {
 
 enum CandyColor { strawberry, lemon, mint, blueberry, grape }
 
-enum BoosterType { bomb, rainbow, lightning, goldenAim, megaBomb, extraSwap }
+enum BoosterType {
+  bomb,
+  rainbow,
+  lightning,
+  colorBlast,
+  rocket,
+  goldenAim,
+  megaBomb,
+  extraSwap,
+}
 
 extension BoosterTypeStyle on BoosterType {
   String get label => switch (this) {
     BoosterType.bomb => 'Bomb',
     BoosterType.rainbow => 'Rainbow',
     BoosterType.lightning => 'Lightning',
+    BoosterType.colorBlast => 'Color Blast',
+    BoosterType.rocket => 'Rocket',
     BoosterType.goldenAim => 'Golden Aim',
     BoosterType.megaBomb => 'Mega Bomb',
     BoosterType.extraSwap => 'Extra Swap',
@@ -56,6 +79,8 @@ extension BoosterTypeStyle on BoosterType {
     BoosterType.bomb => '💣',
     BoosterType.rainbow => '🌈',
     BoosterType.lightning => '⚡',
+    BoosterType.colorBlast => '🌈',
+    BoosterType.rocket => '🚀',
     BoosterType.goldenAim => '🎯',
     BoosterType.megaBomb => '💥',
     BoosterType.extraSwap => '🔄',
@@ -109,12 +134,19 @@ extension CandyColorStyle on CandyColor {
 }
 
 class CandyCell {
-  const CandyCell(this.row, this.col, this.color, {this.isMystery = false});
+  const CandyCell(
+    this.row,
+    this.col,
+    this.color, {
+    this.isMystery = false,
+    this.isBomb = false,
+  });
 
   final int row;
   final int col;
   final CandyColor color;
   final bool isMystery;
+  final bool isBomb;
 
   String get key => '$row:$col';
 }

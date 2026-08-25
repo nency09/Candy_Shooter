@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'services/auth_service.dart';
@@ -19,10 +21,26 @@ class _AuthScreenState extends State<AuthScreen> {
   final _auth = AuthService();
   bool _creatingAccount = false;
   bool _busy = false;
+  bool _passwordVisible = false;
+  bool _waitingForGoogle = false;
   String? _error;
+  StreamSubscription? _authSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _authSubscription = _auth.authState.listen((user) {
+      if (user == null || !_waitingForGoogle || !mounted) return;
+      _waitingForGoogle = false;
+      setState(() => _busy = false);
+      widget.onSignedIn?.call();
+      Navigator.of(context).pop();
+    });
+  }
 
   @override
   void dispose() {
+    _authSubscription?.cancel();
     _name.dispose();
     _email.dispose();
     _password.dispose();
@@ -31,6 +49,7 @@ class _AuthScreenState extends State<AuthScreen> {
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
+    _waitingForGoogle = false;
     setState(() {
       _busy = true;
       _error = null;
@@ -38,17 +57,23 @@ class _AuthScreenState extends State<AuthScreen> {
     try {
       if (_creatingAccount) {
         await _auth.signUp(_name.text, _email.text, _password.text);
-        // Supabase may sign a new account in automatically. Sign it out again so
-        // every new player follows the requested sign-up -> sign-in flow.
+        // Keep the requested sign-up -> verified email -> sign-in flow even if
+        // the provider ever returns a temporary session during registration.
         await _auth.signOut();
         if (mounted) {
+          final email = _email.text.trim();
           setState(() {
             _creatingAccount = false;
+            _name.clear();
             _password.clear();
           });
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Account created. Please sign in to continue.'),
+            SnackBar(
+              duration: const Duration(seconds: 6),
+              content: Text(
+                'Welcome to Candy Shooter! We sent a verification email to '
+                '$email. Open it, verify your account, then sign in.',
+              ),
             ),
           );
         }
@@ -82,8 +107,38 @@ class _AuthScreenState extends State<AuthScreen> {
     }
   }
 
+  Future<void> _signInWithGoogle() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final launched = await _auth.signInWithGoogle();
+      if (!launched) throw StateError('Google sign-in could not be opened.');
+      if (!mounted) return;
+      setState(() {
+        _waitingForGoogle = true;
+        _busy = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Continue with Google to sign in.')),
+      );
+    } catch (error) {
+      if (mounted) setState(() => _error = _friendlyError(error));
+    } finally {
+      if (mounted && !_waitingForGoogle) setState(() => _busy = false);
+    }
+  }
+
   String _friendlyError(Object error) {
-    final message = error.toString();
+    final message = error.toString().toLowerCase();
+    if (message.contains('429') ||
+        message.contains('rate limit') ||
+        message.contains('too many requests') ||
+        message.contains('over_email_send_rate_limit')) {
+      return 'Too many account attempts were made. Please wait a few minutes '
+          'and try again.';
+    }
     if (message.contains('invalid-credential') ||
         message.contains('invalid login credentials')) {
       return 'That email or password is not correct.';
@@ -99,6 +154,14 @@ class _AuthScreenState extends State<AuthScreen> {
     if (message.contains('invalid-email') ||
         message.contains('unable to validate email')) {
       return 'Enter a valid email address.';
+    }
+    if (message.contains('email not confirmed') ||
+        message.contains('email_not_confirmed')) {
+      return 'Please open the confirmation email, then sign in.';
+    }
+    if (message.contains('signup is disabled') ||
+        message.contains('signups not allowed')) {
+      return 'Account creation is currently unavailable. Please try again later.';
     }
     return 'Unable to continue. Please try again.';
   }
@@ -197,10 +260,25 @@ class _AuthScreenState extends State<AuthScreen> {
                     const SizedBox(height: 12),
                     TextFormField(
                       controller: _password,
-                      obscureText: true,
-                      decoration: const InputDecoration(
+                      obscureText: !_passwordVisible,
+                      enableSuggestions: false,
+                      autocorrect: false,
+                      decoration: InputDecoration(
                         labelText: 'Password',
-                        prefixIcon: Icon(Icons.lock_outline_rounded),
+                        prefixIcon: const Icon(Icons.lock_outline_rounded),
+                        suffixIcon: IconButton(
+                          tooltip: _passwordVisible
+                              ? 'Hide password'
+                              : 'Show password',
+                          onPressed: () => setState(
+                            () => _passwordVisible = !_passwordVisible,
+                          ),
+                          icon: Icon(
+                            _passwordVisible
+                                ? Icons.visibility_off_rounded
+                                : Icons.visibility_rounded,
+                          ),
+                        ),
                       ),
                       validator: (value) => value == null || value.length < 6
                           ? 'Use at least 6 characters.'
@@ -245,6 +323,43 @@ class _AuthScreenState extends State<AuthScreen> {
                         onPressed: _busy ? null : _resetPassword,
                         child: const Text('Forgot password?'),
                       ),
+                    Row(
+                      children: [
+                        const Expanded(child: Divider()),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          child: Text(
+                            'OR',
+                            style: TextStyle(
+                              color: Colors.grey.shade600,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        const Expanded(child: Divider()),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: _busy ? null : _signInWithGoogle,
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 13),
+                        side: const BorderSide(color: Color(0xffd9cbe1)),
+                      ),
+                      icon: const Icon(
+                        Icons.g_mobiledata_rounded,
+                        color: Color(0xff4285f4),
+                        size: 31,
+                      ),
+                      label: const Text(
+                        'CONTINUE WITH GOOGLE',
+                        style: TextStyle(
+                          color: Color(0xff654486),
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
                     TextButton(
                       onPressed: _busy
                           ? null

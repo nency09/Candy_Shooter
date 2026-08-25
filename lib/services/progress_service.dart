@@ -11,6 +11,8 @@ class ProgressService {
   static const _bombBoosters = 'bombBoosters';
   static const _rainbowBoosters = 'rainbowBoosters';
   static const _lightningBoosters = 'lightningBoosters';
+  static const _colorBlastBoosters = 'colorBlastBoosters';
+  static const _rocketBoosters = 'rocketBoosters';
   static const _goldenAimBoosters = 'goldenAimBoosters';
   static const _megaBombBoosters = 'megaBombBoosters';
   static const _extraSwapBoosters = 'extraSwapBoosters';
@@ -31,6 +33,8 @@ class ProgressService {
       'bombBoosters': p.getInt(_bombBoosters) ?? 0,
       'rainbowBoosters': p.getInt(_rainbowBoosters) ?? 0,
       'lightningBoosters': p.getInt(_lightningBoosters) ?? 0,
+      'colorBlastBoosters': p.getInt(_colorBlastBoosters) ?? 0,
+      'rocketBoosters': p.getInt(_rocketBoosters) ?? 0,
       'goldenAimBoosters': p.getInt(_goldenAimBoosters) ?? 0,
       'megaBombBoosters': p.getInt(_megaBombBoosters) ?? 0,
       'extraSwapBoosters': p.getInt(_extraSwapBoosters) ?? 0,
@@ -52,6 +56,8 @@ class ProgressService {
     required int bombBoosters,
     required int rainbowBoosters,
     required int lightningBoosters,
+    required int colorBlastBoosters,
+    required int rocketBoosters,
     required int goldenAimBoosters,
     required int megaBombBoosters,
     required int extraSwapBoosters,
@@ -71,6 +77,8 @@ class ProgressService {
       p.setInt(_bombBoosters, bombBoosters),
       p.setInt(_rainbowBoosters, rainbowBoosters),
       p.setInt(_lightningBoosters, lightningBoosters),
+      p.setInt(_colorBlastBoosters, colorBlastBoosters),
+      p.setInt(_rocketBoosters, rocketBoosters),
       p.setInt(_goldenAimBoosters, goldenAimBoosters),
       p.setInt(_megaBombBoosters, megaBombBoosters),
       p.setInt(_extraSwapBoosters, extraSwapBoosters),
@@ -96,6 +104,31 @@ class ProgressService {
       p.remove(_bombBoosters),
       p.remove(_rainbowBoosters),
       p.remove(_lightningBoosters),
+      p.remove(_colorBlastBoosters),
+      p.remove(_rocketBoosters),
+      p.remove(_goldenAimBoosters),
+      p.remove(_megaBombBoosters),
+      p.remove(_extraSwapBoosters),
+      p.remove(_claimedChapterRewards),
+      p.remove(_seenNewRowTutorial),
+      p.remove(_lastLuckySpin),
+    ]);
+  }
+
+  /// Guest players have a temporary game session. Keep their accessibility
+  /// preferences, but remove all gameplay progress before the next launch.
+  Future<void> clearGuestProgress() async {
+    final p = await SharedPreferences.getInstance();
+    await Future.wait([
+      p.remove(_unlocked),
+      p.remove(_coins),
+      p.remove(_stars),
+      p.remove(_scores),
+      p.remove(_bombBoosters),
+      p.remove(_rainbowBoosters),
+      p.remove(_lightningBoosters),
+      p.remove(_colorBlastBoosters),
+      p.remove(_rocketBoosters),
       p.remove(_goldenAimBoosters),
       p.remove(_megaBombBoosters),
       p.remove(_extraSwapBoosters),

@@ -1,8 +1,12 @@
+import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'supabase_service.dart';
 
 class AuthService {
+  static const _mobileRedirectUrl =
+      'com.candyshooter.candyshooter://login-callback';
+
   AuthService({SupabaseClient? client}) : _clientOverride = client;
 
   final SupabaseClient? _clientOverride;
@@ -25,10 +29,19 @@ class AuthService {
   Future<void> signIn(String email, String password) =>
       _client.auth.signInWithPassword(email: email.trim(), password: password);
 
+  Future<bool> signInWithGoogle() => _client.auth.signInWithOAuth(
+    OAuthProvider.google,
+    redirectTo: kIsWeb ? null : _mobileRedirectUrl,
+    scopes: 'email profile',
+  );
+
   Future<void> signUp(String name, String email, String password) async {
     await _client.auth.signUp(
       email: email.trim(),
       password: password,
+      // Confirmation is required before this account can sign in.  On Android,
+      // send the player back into Candy Shooter after they tap the email link.
+      emailRedirectTo: kIsWeb ? null : _mobileRedirectUrl,
       data: {'display_name': name.trim()},
     );
   }

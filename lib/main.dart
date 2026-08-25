@@ -22,6 +22,13 @@ Future<void> main() async {
   runApp(const CandyShooterApp());
 }
 
+class LuckySpinReward {
+  const LuckySpinReward({required this.label, required this.index});
+
+  final String label;
+  final int index;
+}
+
 class AppModel extends ChangeNotifier {
   AppModel() {
     _authSubscription = auth.authState.listen((_) => _onAuthChanged());
@@ -42,6 +49,8 @@ class AppModel extends ChangeNotifier {
   int bombBoosters = 0;
   int rainbowBoosters = 0;
   int lightningBoosters = 0;
+  int colorBlastBoosters = 0;
+  int rocketBoosters = 0;
   int goldenAimBoosters = 0;
   int megaBombBoosters = 0;
   int extraSwapBoosters = 0;
@@ -50,10 +59,15 @@ class AppModel extends ChangeNotifier {
   String lastLuckySpin = '';
   bool ready = false;
   bool _loadingCloudProgress = false;
+  bool _hasSignedInSession = false;
 
   Future<void> _load() async {
     final started = DateTime.now();
     try {
+      // Guest gameplay is intentionally temporary. Preferences still remain on
+      // the device, while levels, coins and boosters restart on the next app
+      // launch unless the player signs in.
+      if (auth.currentUser == null) await _store.clearGuestProgress();
       final saved = await _store.load();
       unlocked = (saved['unlocked'] as int? ?? 1).clamp(1, levels.length);
       coins = math.max(0, saved['coins'] as int? ?? 125);
@@ -65,6 +79,11 @@ class AppModel extends ChangeNotifier {
       bombBoosters = math.max(0, saved['bombBoosters'] as int? ?? 0);
       rainbowBoosters = math.max(0, saved['rainbowBoosters'] as int? ?? 0);
       lightningBoosters = math.max(0, saved['lightningBoosters'] as int? ?? 0);
+      colorBlastBoosters = math.max(
+        0,
+        saved['colorBlastBoosters'] as int? ?? 0,
+      );
+      rocketBoosters = math.max(0, saved['rocketBoosters'] as int? ?? 0);
       goldenAimBoosters = math.max(0, saved['goldenAimBoosters'] as int? ?? 0);
       megaBombBoosters = math.max(0, saved['megaBombBoosters'] as int? ?? 0);
       extraSwapBoosters = math.max(0, saved['extraSwapBoosters'] as int? ?? 0);
@@ -97,26 +116,30 @@ class AppModel extends ChangeNotifier {
   }
 
   Future<void> _save() async {
-    await _store.save(
-      unlocked: unlocked,
-      coins: coins,
-      stars: stars,
-      scores: scores,
-      sound: sound,
-      music: music,
-      haptics: haptics,
-      bombBoosters: bombBoosters,
-      rainbowBoosters: rainbowBoosters,
-      lightningBoosters: lightningBoosters,
-      goldenAimBoosters: goldenAimBoosters,
-      megaBombBoosters: megaBombBoosters,
-      extraSwapBoosters: extraSwapBoosters,
-      claimedChapterRewards: claimedChapterRewards.toList(),
-      seenNewRowTutorial: seenNewRowTutorial,
-      lastLuckySpin: lastLuckySpin,
-    );
+    await _saveLocalProgress();
     _saveCloudProgress();
   }
+
+  Future<void> _saveLocalProgress() => _store.save(
+    unlocked: unlocked,
+    coins: coins,
+    stars: stars,
+    scores: scores,
+    sound: sound,
+    music: music,
+    haptics: haptics,
+    bombBoosters: bombBoosters,
+    rainbowBoosters: rainbowBoosters,
+    lightningBoosters: lightningBoosters,
+    colorBlastBoosters: colorBlastBoosters,
+    rocketBoosters: rocketBoosters,
+    goldenAimBoosters: goldenAimBoosters,
+    megaBombBoosters: megaBombBoosters,
+    extraSwapBoosters: extraSwapBoosters,
+    claimedChapterRewards: claimedChapterRewards.toList(),
+    seenNewRowTutorial: seenNewRowTutorial,
+    lastLuckySpin: lastLuckySpin,
+  );
 
   Map<String, Object> _cloudProgressSnapshot() {
     final user = auth.currentUser;
@@ -137,6 +160,8 @@ class AppModel extends ChangeNotifier {
       'bombBoosters': bombBoosters,
       'rainbowBoosters': rainbowBoosters,
       'lightningBoosters': lightningBoosters,
+      'colorBlastBoosters': colorBlastBoosters,
+      'rocketBoosters': rocketBoosters,
       'goldenAimBoosters': goldenAimBoosters,
       'megaBombBoosters': megaBombBoosters,
       'extraSwapBoosters': extraSwapBoosters,
@@ -149,7 +174,33 @@ class AppModel extends ChangeNotifier {
   void _onAuthChanged() {
     if (!ready) return;
     final user = auth.currentUser;
-    if (user != null) _loadCloudProgress(user.id);
+    if (user != null) {
+      _hasSignedInSession = true;
+      _loadCloudProgress(user.id);
+    } else if (_hasSignedInSession) {
+      _hasSignedInSession = false;
+      _startFreshGuestSession();
+    }
+  }
+
+  Future<void> _startFreshGuestSession() async {
+    await _store.clearGuestProgress();
+    _applyFreshProgress();
+    notifyListeners();
+  }
+
+  void _applyFreshProgress() {
+    unlocked = 1;
+    coins = 125;
+    stars = List.filled(levels.length, 0);
+    scores = List.filled(levels.length, 0);
+    bombBoosters = rainbowBoosters = 0;
+    lightningBoosters = colorBlastBoosters = rocketBoosters = 0;
+    goldenAimBoosters = megaBombBoosters = 0;
+    extraSwapBoosters = 0;
+    claimedChapterRewards.clear();
+    seenNewRowTutorial = false;
+    lastLuckySpin = '';
   }
 
   Future<void> _loadCloudProgress(String uid) async {
@@ -158,29 +209,19 @@ class AppModel extends ChangeNotifier {
     final cloud = CloudProgressService(uid);
     try {
       final saved = await cloud.load();
+      // The user may have logged out while their cloud save was loading.
+      if (auth.currentUser?.id != uid) return;
       if (saved == null) {
+        // A new account starts with its own clean progress. It must not inherit
+        // coins, boosters, or levels from the temporary guest session.
+        _applyFreshProgress();
+        await _saveLocalProgress();
         await cloud.save(_cloudProgressSnapshot());
+        notifyListeners();
         return;
       }
-      _mergeCloudProgress(saved);
-      await _store.save(
-        unlocked: unlocked,
-        coins: coins,
-        stars: stars,
-        scores: scores,
-        sound: sound,
-        music: music,
-        haptics: haptics,
-        bombBoosters: bombBoosters,
-        rainbowBoosters: rainbowBoosters,
-        lightningBoosters: lightningBoosters,
-        goldenAimBoosters: goldenAimBoosters,
-        megaBombBoosters: megaBombBoosters,
-        extraSwapBoosters: extraSwapBoosters,
-        claimedChapterRewards: claimedChapterRewards.toList(),
-        seenNewRowTutorial: seenNewRowTutorial,
-        lastLuckySpin: lastLuckySpin,
-      );
+      _applyCloudProgress(saved);
+      await _saveLocalProgress();
       await cloud.save(_cloudProgressSnapshot());
       notifyListeners();
     } catch (_) {
@@ -190,62 +231,53 @@ class AppModel extends ChangeNotifier {
     }
   }
 
-  void _mergeCloudProgress(Map<String, Object> saved) {
-    final cloudUnlocked = ((saved['unlocked'] as num?)?.toInt() ?? 1).clamp(
+  void _applyCloudProgress(Map<String, Object> saved) {
+    unlocked = ((saved['unlocked'] as num?)?.toInt() ?? 1).clamp(
       1,
       levels.length,
     );
-    unlocked = math.max(unlocked, cloudUnlocked);
-    coins = math.max(
-      0,
-      math.max(coins, (saved['coins'] as num?)?.toInt() ?? 0),
-    );
-    final cloudStars = _normaliseScores(saved['stars']);
-    final cloudScores = _normaliseScores(saved['scores']);
-    stars = List<int>.generate(
-      levels.length,
-      (index) => math.max(stars[index], cloudStars[index]),
-    );
-    scores = List<int>.generate(
-      levels.length,
-      (index) => math.max(scores[index], cloudScores[index]),
-    );
-    sound = saved['sound'] as bool? ?? sound;
-    music = saved['music'] as bool? ?? music;
-    haptics = saved['haptics'] as bool? ?? haptics;
-    bombBoosters = math.max(
-      bombBoosters,
-      (saved['bombBoosters'] as num?)?.toInt() ?? 0,
-    );
+    coins = math.max(0, (saved['coins'] as num?)?.toInt() ?? 125);
+    stars = _normaliseScores(saved['stars']);
+    scores = _normaliseScores(saved['scores']);
+    sound = saved['sound'] as bool? ?? true;
+    music = saved['music'] as bool? ?? true;
+    haptics = saved['haptics'] as bool? ?? true;
+    bombBoosters = math.max(0, (saved['bombBoosters'] as num?)?.toInt() ?? 0);
     rainbowBoosters = math.max(
-      rainbowBoosters,
+      0,
       (saved['rainbowBoosters'] as num?)?.toInt() ?? 0,
     );
     lightningBoosters = math.max(
-      lightningBoosters,
+      0,
       (saved['lightningBoosters'] as num?)?.toInt() ?? 0,
     );
+    colorBlastBoosters = math.max(
+      0,
+      (saved['colorBlastBoosters'] as num?)?.toInt() ?? 0,
+    );
+    rocketBoosters = math.max(
+      0,
+      (saved['rocketBoosters'] as num?)?.toInt() ?? 0,
+    );
     goldenAimBoosters = math.max(
-      goldenAimBoosters,
+      0,
       (saved['goldenAimBoosters'] as num?)?.toInt() ?? 0,
     );
     megaBombBoosters = math.max(
-      megaBombBoosters,
+      0,
       (saved['megaBombBoosters'] as num?)?.toInt() ?? 0,
     );
     extraSwapBoosters = math.max(
-      extraSwapBoosters,
+      0,
       (saved['extraSwapBoosters'] as num?)?.toInt() ?? 0,
     );
-    claimedChapterRewards.addAll(
-      (saved['claimedChapterRewards'] as List? ?? const [])
-          .map((value) => int.tryParse('$value'))
-          .whereType<int>(),
-    );
-    seenNewRowTutorial =
-        seenNewRowTutorial || (saved['seenNewRowTutorial'] as bool? ?? false);
-    final cloudSpin = saved['lastLuckySpin'] as String? ?? '';
-    if (cloudSpin.compareTo(lastLuckySpin) > 0) lastLuckySpin = cloudSpin;
+    claimedChapterRewards =
+        (saved['claimedChapterRewards'] as List? ?? const [])
+            .map((value) => int.tryParse('$value'))
+            .whereType<int>()
+            .toSet();
+    seenNewRowTutorial = saved['seenNewRowTutorial'] as bool? ?? false;
+    lastLuckySpin = saved['lastLuckySpin'] as String? ?? '';
   }
 
   void _saveCloudProgress() {
@@ -260,6 +292,8 @@ class AppModel extends ChangeNotifier {
     BoosterType.bomb => bombBoosters,
     BoosterType.rainbow => rainbowBoosters,
     BoosterType.lightning => lightningBoosters,
+    BoosterType.colorBlast => colorBlastBoosters,
+    BoosterType.rocket => rocketBoosters,
     BoosterType.goldenAim => goldenAimBoosters,
     BoosterType.megaBomb => megaBombBoosters,
     BoosterType.extraSwap => extraSwapBoosters,
@@ -320,6 +354,10 @@ class AppModel extends ChangeNotifier {
         rainbowBoosters += chapter.rewardAmount;
       case BoosterType.lightning:
         lightningBoosters += chapter.rewardAmount;
+      case BoosterType.colorBlast:
+        colorBlastBoosters += chapter.rewardAmount;
+      case BoosterType.rocket:
+        rocketBoosters += chapter.rewardAmount;
       case BoosterType.goldenAim:
         goldenAimBoosters += chapter.rewardAmount;
       case BoosterType.megaBomb:
@@ -343,6 +381,10 @@ class AppModel extends ChangeNotifier {
         rainbowBoosters--;
       case BoosterType.lightning:
         lightningBoosters--;
+      case BoosterType.colorBlast:
+        colorBlastBoosters--;
+      case BoosterType.rocket:
+        rocketBoosters--;
       case BoosterType.goldenAim:
         goldenAimBoosters--;
       case BoosterType.megaBomb:
@@ -365,6 +407,10 @@ class AppModel extends ChangeNotifier {
         rainbowBoosters++;
       case BoosterType.lightning:
         lightningBoosters++;
+      case BoosterType.colorBlast:
+        colorBlastBoosters++;
+      case BoosterType.rocket:
+        rocketBoosters++;
       case BoosterType.goldenAim:
         goldenAimBoosters++;
       case BoosterType.megaBomb:
@@ -389,6 +435,10 @@ class AppModel extends ChangeNotifier {
         rainbowBoosters++;
       case BoosterType.lightning:
         lightningBoosters++;
+      case BoosterType.colorBlast:
+        colorBlastBoosters++;
+      case BoosterType.rocket:
+        rocketBoosters++;
       case BoosterType.goldenAim:
         goldenAimBoosters++;
       case BoosterType.megaBomb:
@@ -411,7 +461,7 @@ class AppModel extends ChangeNotifier {
   bool get canLuckySpin => lastLuckySpin != _today;
   String get _today => DateTime.now().toIso8601String().substring(0, 10);
 
-  Future<String?> luckySpin() async {
+  Future<LuckySpinReward?> luckySpin() async {
     if (!canLuckySpin) return null;
     const rewards = [
       '50 Coins',
@@ -421,7 +471,8 @@ class AppModel extends ChangeNotifier {
       'Lightning',
       'Mystery',
     ];
-    final reward = rewards[math.Random().nextInt(rewards.length)];
+    final index = math.Random().nextInt(rewards.length);
+    final reward = rewards[index];
     switch (reward) {
       case '50 Coins':
         coins += 50;
@@ -439,7 +490,7 @@ class AppModel extends ChangeNotifier {
     lastLuckySpin = _today;
     await _save();
     notifyListeners();
-    return reward;
+    return LuckySpinReward(label: reward, index: index);
   }
 
   Future<void> updateSettings({bool? sound, bool? music, bool? haptics}) async {
@@ -458,7 +509,8 @@ class AppModel extends ChangeNotifier {
     scores = List.filled(levels.length, 0);
     sound = music = haptics = true;
     bombBoosters = rainbowBoosters = 0;
-    lightningBoosters = goldenAimBoosters = megaBombBoosters = 0;
+    lightningBoosters = colorBlastBoosters = rocketBoosters = 0;
+    goldenAimBoosters = megaBombBoosters = 0;
     extraSwapBoosters = 0;
     claimedChapterRewards.clear();
     seenNewRowTutorial = false;
@@ -665,69 +717,70 @@ class HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) => GradientScaffold(
     child: SafeArea(
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 8, 18, 0),
-            child: Row(
-              children: [
-                RoundIcon(Icons.settings_rounded, () => go(AppPage.settings)),
-                const Spacer(),
-                CoinPill(coins: model.coins),
-              ],
+      child: LayoutBuilder(
+        builder: (context, constraints) => SingleChildScrollView(
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: constraints.maxHeight),
+            child: IntrinsicHeight(
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(18, 8, 18, 0),
+                    child: Row(
+                      children: [
+                        RoundIcon(
+                          Icons.settings_rounded,
+                          () => go(AppPage.settings),
+                        ),
+                        const Spacer(),
+                        CoinPill(coins: model.coins),
+                      ],
+                    ),
+                  ),
+                  const Spacer(),
+                  const LollipopDecoration(size: 86),
+                  const SizedBox(height: 2),
+                  const LogoText(),
+                  const SizedBox(height: 20),
+                  PulseButton(label: 'PLAY', onTap: () => go(AppPage.map)),
+                  const SizedBox(height: 16),
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 12,
+                    alignment: WrapAlignment.center,
+                    children: [
+                      MiniNav(
+                        icon: Icons.card_giftcard_rounded,
+                        label: 'Rewards',
+                        onTap: () => go(AppPage.collection),
+                      ),
+                      MiniNav(
+                        icon: Icons.storefront_rounded,
+                        label: 'Shop',
+                        onTap: () => go(AppPage.shop),
+                      ),
+                      MiniNav(
+                        icon: Icons.emoji_events_rounded,
+                        label: 'Ranks',
+                        onTap: () => go(AppPage.leaderboard),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  HomeProgressCard(
+                    level: model.unlocked,
+                    stars: model.stars.fold<int>(
+                      0,
+                      (sum, value) => sum + value,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+              ),
             ),
           ),
-          const Spacer(),
-          const LollipopDecoration(size: 86),
-          const SizedBox(height: 2),
-          const LogoText(),
-          const SizedBox(height: 20),
-          PulseButton(label: 'PLAY', onTap: () => go(AppPage.map)),
-          const SizedBox(height: 16),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            alignment: WrapAlignment.center,
-            children: [
-              MiniNav(
-                icon: Icons.map_rounded,
-                label: 'Levels',
-                onTap: () => go(AppPage.map),
-              ),
-              MiniNav(
-                icon: Icons.card_giftcard_rounded,
-                label: 'Rewards',
-                onTap: () => go(AppPage.collection),
-              ),
-              MiniNav(
-                icon: Icons.storefront_rounded,
-                label: 'Shop',
-                onTap: () => go(AppPage.shop),
-              ),
-              MiniNav(
-                icon: Icons.emoji_events_rounded,
-                label: 'Ranks',
-                onTap: () => go(AppPage.leaderboard),
-              ),
-              MiniNav(
-                icon: Icons.emoji_events_rounded,
-                label: 'Stars',
-                onTap: () => go(AppPage.map),
-              ),
-              MiniNav(
-                icon: Icons.settings_rounded,
-                label: 'Settings',
-                onTap: () => go(AppPage.settings),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          HomeProgressCard(
-            level: model.unlocked,
-            stars: model.stars.fold<int>(0, (sum, value) => sum + value),
-          ),
-          const SizedBox(height: 16),
-        ],
+        ),
       ),
     ),
   );
@@ -766,15 +819,21 @@ class LevelMapScreen extends StatelessWidget {
                 .take(10)
                 .fold<int>(0, (sum, stars) => sum + stars),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
           Expanded(
             child: WorldPathMap(
               chapter: chapters[chapter - 1],
               unlocked: model.unlocked,
               stars: model.stars,
               onLevelTap: (number) => go(AppPage.game, selectedLevel: number),
+              onNavigate: go,
+              onDailySpin: () => showDialog<void>(
+                context: context,
+                builder: (_) => LuckySpinDialog(model: model),
+              ),
             ),
           ),
+          MapBottomNavigation(go: go),
         ],
       ),
     ),
@@ -941,69 +1000,380 @@ class WorldRibbon extends StatelessWidget {
   );
 }
 
-class WorldPathMap extends StatelessWidget {
+class WorldPathMap extends StatefulWidget {
   const WorldPathMap({
     super.key,
     required this.chapter,
     required this.unlocked,
     required this.stars,
     required this.onLevelTap,
+    required this.onNavigate,
+    required this.onDailySpin,
   });
 
   final int unlocked;
   final ChapterConfig chapter;
   final List<int> stars;
   final ValueChanged<int> onLevelTap;
+  final void Function(AppPage, {int? selectedLevel}) onNavigate;
+  final VoidCallback onDailySpin;
+
+  @override
+  State<WorldPathMap> createState() => _WorldPathMapState();
+}
+
+class _WorldPathMapState extends State<WorldPathMap> {
+  final ScrollController _scrollController = ScrollController();
+  bool _positioned = false;
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (_, constraints) {
       final width = constraints.maxWidth;
-      final firstVisibleLevel = math.max(1, chapter.startLevel - 10);
+      final firstVisibleLevel = math.max(1, widget.chapter.startLevel - 10);
       final visibleLevels = levels
           .skip(firstVisibleLevel - 1)
           .take(20)
           .toList();
-      final mapHeight = math.max(1120.0, visibleLevels.length * 96.0 + 180);
+      final mapHeight = math.max(
+        constraints.maxHeight + 80,
+        visibleLevels.length * 112.0 + 220,
+      );
       final points = List<Offset>.generate(visibleLevels.length, (index) {
-        final x = width / 2 + math.sin(index * 1.36) * width * .27;
-        return Offset(x, 72 + index * 96.0);
+        // Level 1 is intentionally at the bottom.  Each following level
+        // climbs the candy path toward the top of the map.
+        final x = width * .61 + math.sin(index * 1.28 + .45) * width * .21;
+        return Offset(
+          x.clamp(82.0, width - 48.0),
+          mapHeight - 88 - index * 112.0,
+        );
       });
-      return SingleChildScrollView(
-        padding: const EdgeInsets.only(bottom: 20),
-        child: SizedBox(
-          height: math.max(mapHeight, constraints.maxHeight),
-          width: width,
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: CustomPaint(painter: WorldPathPainter(points)),
-              ),
-              for (var index = 0; index < visibleLevels.length; index++)
-                Positioned(
-                  left: points[index].dx - 37,
-                  top: points[index].dy - 37,
-                  child: LevelBubble(
-                    number: visibleLevels[index].id,
-                    stars: stars[visibleLevels[index].id - 1],
-                    locked: visibleLevels[index].id > unlocked,
-                    current: visibleLevels[index].id == unlocked,
-                    onTap: visibleLevels[index].id <= unlocked
-                        ? () => onLevelTap(visibleLevels[index].id)
-                        : null,
+      final currentIndex = visibleLevels.indexWhere(
+        (level) => level.id == widget.unlocked,
+      );
+      if (!_positioned && currentIndex >= 0) {
+        _positioned = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!_scrollController.hasClients || !mounted) return;
+          final target = (points[currentIndex].dy - constraints.maxHeight * .64)
+              .clamp(0.0, _scrollController.position.maxScrollExtent);
+          _scrollController.jumpTo(target);
+        });
+      }
+      return Stack(
+        children: [
+          SingleChildScrollView(
+            controller: _scrollController,
+            physics: const BouncingScrollPhysics(),
+            padding: const EdgeInsets.only(bottom: 20),
+            child: SizedBox(
+              height: math.max(mapHeight, constraints.maxHeight),
+              width: width,
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: CustomPaint(painter: WorldPathPainter(points)),
                   ),
-                ),
-              Positioned(
-                left: 18,
-                right: 18,
-                bottom: 24,
-                child: ChapterRewardBanner(chapter: chapter),
+                  for (var index = 0; index < visibleLevels.length; index++)
+                    Positioned(
+                      left: points[index].dx - 37,
+                      top: points[index].dy - 37,
+                      child: LevelBubble(
+                        number: visibleLevels[index].id,
+                        stars: widget.stars[visibleLevels[index].id - 1],
+                        locked: visibleLevels[index].id > widget.unlocked,
+                        current: visibleLevels[index].id == widget.unlocked,
+                        onTap: visibleLevels[index].id <= widget.unlocked
+                            ? () => widget.onLevelTap(visibleLevels[index].id)
+                            : null,
+                      ),
+                    ),
+                  if (currentIndex >= 0)
+                    Positioned(
+                      left: points[currentIndex].dx > width * .58
+                          ? 14
+                          : width - 120,
+                      top: points[currentIndex].dy - 42,
+                      child: const MapNextCallout(),
+                    ),
+                  Positioned(
+                    top: 20,
+                    right: 16,
+                    child: ChapterMapReward(chapter: widget.chapter),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
-        ),
+          Positioned(
+            left: 12,
+            top: 100,
+            child: MapShortcutRail(
+              onNavigate: widget.onNavigate,
+              onDailySpin: widget.onDailySpin,
+            ),
+          ),
+        ],
       );
     },
+  );
+}
+
+class MapShortcutRail extends StatelessWidget {
+  const MapShortcutRail({
+    super.key,
+    required this.onNavigate,
+    required this.onDailySpin,
+  });
+
+  final void Function(AppPage, {int? selectedLevel}) onNavigate;
+  final VoidCallback onDailySpin;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      MapShortcutButton(
+        icon: Icons.storefront_rounded,
+        label: 'Shop',
+        color: const Color(0xffffb43c),
+        onTap: () => onNavigate(AppPage.shop),
+      ),
+      const SizedBox(height: 8),
+      MapShortcutButton(
+        icon: Icons.casino_rounded,
+        label: 'Daily spin',
+        color: const Color(0xff9a66d8),
+        onTap: onDailySpin,
+      ),
+    ],
+  );
+}
+
+class MapShortcutButton extends StatelessWidget {
+  const MapShortcutButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Pressable(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(15),
+    child: Container(
+      width: 58,
+      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 3),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .94),
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: color.withValues(alpha: .7), width: 2),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x33003583),
+            offset: Offset(0, 3),
+            blurRadius: 0,
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 24, color: color),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            maxLines: 2,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Color(0xff654486),
+              fontSize: 9,
+              height: 1.05,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class MapNextCallout extends StatelessWidget {
+  const MapNextCallout({super.key});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      color: const Color(0xfff6538a),
+      borderRadius: BorderRadius.circular(10),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x33003583),
+          offset: Offset(0, 3),
+          blurRadius: 0,
+        ),
+      ],
+    ),
+    child: const Text(
+      'NEXT',
+      style: TextStyle(
+        color: Colors.white,
+        fontSize: 10,
+        fontWeight: FontWeight.w900,
+      ),
+    ),
+  );
+}
+
+class ChapterMapReward extends StatelessWidget {
+  const ChapterMapReward({super.key, required this.chapter});
+
+  final ChapterConfig chapter;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    constraints: const BoxConstraints(maxWidth: 130),
+    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+    decoration: BoxDecoration(
+      color: Colors.white.withValues(alpha: .9),
+      borderRadius: BorderRadius.circular(15),
+      border: Border.all(color: const Color(0xffffd47b), width: 2),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(
+          Icons.card_giftcard_rounded,
+          color: Color(0xffffad28),
+          size: 23,
+        ),
+        const SizedBox(width: 5),
+        Flexible(
+          child: Text(
+            'Chapter reward\n${chapter.reward.label}',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Color(0xff654486),
+              fontSize: 9,
+              height: 1.05,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class MapBottomNavigation extends StatelessWidget {
+  const MapBottomNavigation({super.key, required this.go});
+
+  final void Function(AppPage, {int? selectedLevel}) go;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.fromLTRB(18, 4, 18, 12),
+    padding: const EdgeInsets.symmetric(vertical: 7),
+    decoration: BoxDecoration(
+      color: Colors.white.withValues(alpha: .93),
+      borderRadius: BorderRadius.circular(20),
+      border: Border.all(color: const Color(0xffffd7ed), width: 2),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x33003583),
+          offset: Offset(0, 4),
+          blurRadius: 0,
+        ),
+      ],
+    ),
+    child: Row(
+      children: [
+        Expanded(
+          child: MapBottomItem(
+            icon: Icons.map_rounded,
+            label: 'MAP',
+            color: const Color(0xfff6538a),
+            active: true,
+            onTap: () => go(AppPage.map),
+          ),
+        ),
+        Expanded(
+          child: MapBottomItem(
+            icon: Icons.emoji_events_rounded,
+            label: 'RANKS',
+            color: const Color(0xff9a66d8),
+            onTap: () => go(AppPage.leaderboard),
+          ),
+        ),
+        Expanded(
+          child: MapBottomItem(
+            icon: Icons.card_giftcard_rounded,
+            label: 'REWARDS',
+            color: const Color(0xfff3a92e),
+            onTap: () => go(AppPage.collection),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class MapBottomItem extends StatelessWidget {
+  const MapBottomItem({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onTap,
+    this.active = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Pressable(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(14),
+    child: Container(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      decoration: BoxDecoration(
+        color: active ? color.withValues(alpha: .14) : Colors.transparent,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 26),
+          Text(
+            label,
+            style: TextStyle(
+              color: active ? color : const Color(0xff654486),
+              fontSize: 10,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    ),
   );
 }
 
@@ -1161,6 +1531,13 @@ class ShotSpark {
   double life = 1;
 }
 
+class _ShotCollision {
+  const _ShotCollision({required this.position, this.cell});
+
+  final Offset position;
+  final CandyCell? cell;
+}
+
 class PopEffect {
   const PopEffect({
     required this.position,
@@ -1207,6 +1584,9 @@ class GameScreen extends StatefulWidget {
 
 class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   final random = math.Random();
+  // The result panel is rendered above the complete screen, not just inside
+  // the lower playfield, so it can be genuinely centred for the player.
+  bool showFullScreenResultOverlay = true;
   final List<CandyCell> board = [];
   Timer? flightTimer;
   Timer? rowTimer;
@@ -1241,6 +1621,24 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           _settleIncomingRow();
         }
       });
+  late final AnimationController bombController =
+      AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 280),
+      )..addStatusListener((status) {
+        if (status == AnimationStatus.completed && mounted) {
+          setState(() => bombExplosion = null);
+        }
+      });
+  late final AnimationController rocketController =
+      AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 260),
+      )..addStatusListener((status) {
+        if (status == AnimationStatus.completed && mounted) {
+          setState(() => rocketBlastY = null);
+        }
+      });
   CandyColor current = CandyColor.strawberry;
   CandyColor next = CandyColor.lemon;
   List<Offset> aimPath = const [];
@@ -1249,10 +1647,21 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   final List<PopEffect> popEffects = [];
   final List<DropEffect> dropEffects = [];
   final List<CandyCell> incomingRow = [];
+  // Snapshot used only to render the old board while the logical board has
+  // already moved down to its new grid rows.
+  final List<CandyCell> movingBoard = [];
   Offset? aimInput;
   Offset? _lastAimSample;
   Offset? flight;
   CandyColor? flyingColor;
+  bool flyingBomb = false;
+  bool bombLaunching = false;
+  bool flyingRocket = false;
+  bool rocketLaunching = false;
+  bool colorBlastAnimating = false;
+  final Set<String> colorBlastTargets = <String>{};
+  Offset? bombExplosion;
+  double? rocketBlastY;
   int shots = 0;
   int score = 0;
   int cleared = 0;
@@ -1292,6 +1701,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     rowTimer?.cancel();
     rowController.stop();
     rowController.value = 0;
+    bombController.stop();
+    bombController.value = 0;
     board.clear();
     shots = widget.config.shots;
     score = cleared = yellowCleared = combo = 0;
@@ -1305,10 +1716,16 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     popEffects.clear();
     dropEffects.clear();
     incomingRow.clear();
+    movingBoard.clear();
     aimInput = null;
     _lastAimSample = null;
     flight = null;
     flyingColor = null;
+    flyingBomb = bombLaunching = flyingRocket = rocketLaunching = false;
+    colorBlastAnimating = false;
+    colorBlastTargets.clear();
+    bombExplosion = null;
+    rocketBlastY = null;
     rowWarning = rowAnimating = false;
     paused = finished = won = chapterComplete = false;
     completedChapter = null;
@@ -1327,6 +1744,29 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         );
       }
     }
+    // Bomb candies are board objects, not normal colour-match candies. Their
+    // exact cells remain part of the same staggered grid and can be triggered
+    // by a bomb blast later in the level.
+    for (
+      var index = 0;
+      index < widget.config.bombCount && board.isNotEmpty;
+      index++
+    ) {
+      final candidates = board.where((cell) => !cell.isBomb).toList();
+      if (candidates.isEmpty) break;
+      final selected = candidates[random.nextInt(candidates.length)];
+      board
+        ..remove(selected)
+        ..add(
+          CandyCell(
+            selected.row,
+            selected.col,
+            selected.color,
+            isMystery: selected.isMystery,
+            isBomb: true,
+          ),
+        );
+    }
     if (widget.config.id >= 51 && board.isNotEmpty) {
       final candidates = board.where((cell) => cell.row >= 2).toList();
       final selected =
@@ -1341,6 +1781,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
             selected.col,
             selected.color,
             isMystery: true,
+            isBomb: selected.isBomb,
           ),
         );
     }
@@ -1351,12 +1792,26 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   int _columnsForRow(int row, {int? phase}) =>
       7 - ((row + (phase ?? gridPhase)).isOdd ? 1 : 0);
 
-  bool _touches(CandyCell first, CandyCell second, BoardGeometry g) =>
-      (g.position(first) - g.position(second)).distance < g.ballDiameter * 1.04;
-
-  List<CandyCell> _neighbors(CandyCell cell, BoardGeometry g) => board
-      .where((other) => other != cell && _touches(other, cell, g))
-      .toList();
+  /// Returns the six logical neighbours of a cell in the staggered board.
+  ///
+  /// Gameplay decisions must use row/column addresses, rather than the
+  /// rendered coordinates. That keeps matches and ceiling connectivity stable
+  /// while the whole board is animating down after a ceiling drop.
+  List<CandyCell> _neighbors(CandyCell cell) {
+    final offsetRow = (cell.row + gridPhase).isOdd;
+    final diagonalColumn = offsetRow ? cell.col + 1 : cell.col - 1;
+    final neighborKeys = <String>{
+      '${cell.row}:${cell.col - 1}',
+      '${cell.row}:${cell.col + 1}',
+      '${cell.row - 1}:${cell.col}',
+      '${cell.row - 1}:$diagonalColumn',
+      '${cell.row + 1}:${cell.col}',
+      '${cell.row + 1}:$diagonalColumn',
+    };
+    return board
+        .where((other) => other != cell && neighborKeys.contains(other.key))
+        .toList(growable: false);
+  }
 
   Offset? _velocity(Offset local, BoardGeometry g) {
     var target = local;
@@ -1365,7 +1820,46 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     }
     final direction = target - g.launcher;
     if (direction.dy >= -12 || direction.distance == 0) return null;
-    return direction / direction.distance * 7;
+    // Keep the physical path identical, but make the actual launched candy
+    // feel responsive on a tap. Exact segment collision checks still prevent
+    // it from skipping past a candy at this higher speed.
+    return direction / direction.distance * 10;
+  }
+
+  /// Finds the first physical contact along one projectile movement segment.
+  /// The returned point is a candy-centre collision point, not an overshot
+  /// timer position, so aiming and snapping use the same geometry.
+  _ShotCollision? _firstCollision(Offset start, Offset end, BoardGeometry g) {
+    final segment = end - start;
+    final lengthSquared = segment.distanceSquared;
+    if (lengthSquared == 0) return null;
+
+    _ShotCollision? first;
+    var firstT = double.infinity;
+    void consider(double t, CandyCell? cell) {
+      if (t < 0 || t > 1 || t >= firstT) return;
+      firstT = t;
+      first = _ShotCollision(position: start + segment * t, cell: cell);
+    }
+
+    // The projectile touches a board candy when the two centres are one
+    // diameter apart. Solve that circle/line-segment intersection exactly.
+    for (final cell in board) {
+      final fromCenter = start - g.position(cell);
+      final b = 2 * (fromCenter.dx * segment.dx + fromCenter.dy * segment.dy);
+      final c = fromCenter.distanceSquared - g.ballDiameter * g.ballDiameter;
+      final discriminant = b * b - 4 * lengthSquared * c;
+      if (discriminant < 0) continue;
+      final root = math.sqrt(discriminant);
+      consider((-b - root) / (2 * lengthSquared), cell);
+      consider((-b + root) / (2 * lengthSquared), cell);
+    }
+
+    final ceilingY = g.top - g.ballDiameter / 2;
+    if (start.dy >= ceilingY && end.dy <= ceilingY) {
+      consider((ceilingY - start.dy) / segment.dy, null);
+    }
+    return first;
   }
 
   List<Offset> _trajectory(Offset local, BoardGeometry g) {
@@ -1381,20 +1875,26 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         velocity = Offset(-velocity.dx, velocity.dy);
         nextPoint = point + velocity;
       }
-      point = nextPoint;
-      if (point.dy <= g.top - g.ballDiameter / 2 ||
-          board.any(
-            (cell) => (g.position(cell) - point).distance < g.ballDiameter,
-          )) {
-        path.add(point);
+      final collision = _firstCollision(point, nextPoint, g);
+      if (collision != null) {
+        path.add(collision.position);
         return path;
       }
+      point = nextPoint;
+      if (step.isEven) path.add(point);
     }
     return path;
   }
 
   void _updateAim(Offset point, BoardGeometry g) {
-    if (finished || paused || rowWarning || rowAnimating || flight != null) {
+    if (finished ||
+        paused ||
+        rowWarning ||
+        rowAnimating ||
+        colorBlastAnimating ||
+        bombLaunching ||
+        rocketLaunching ||
+        flight != null) {
       return;
     }
     aimInput = point;
@@ -1409,7 +1909,14 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _swapNextCandy() async {
-    if (finished || paused || rowWarning || rowAnimating || flight != null) {
+    if (finished ||
+        paused ||
+        rowWarning ||
+        rowAnimating ||
+        colorBlastAnimating ||
+        bombLaunching ||
+        rocketLaunching ||
+        flight != null) {
       return;
     }
     final usingFreeSwap = freeSwaps > 0;
@@ -1436,6 +1943,11 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   Future<void> _selectBooster(BoosterType type) async {
     if (finished ||
         paused ||
+        rowWarning ||
+        rowAnimating ||
+        colorBlastAnimating ||
+        bombLaunching ||
+        rocketLaunching ||
         flight != null ||
         widget.model.boosterCount(type) == 0) {
       return;
@@ -1450,17 +1962,170 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       }
       return;
     }
+    if (type == BoosterType.colorBlast) {
+      setState(() {
+        activeBooster = BoosterType.colorBlast;
+        praise = 'Choose a candy colour!';
+      });
+      final selectedColor = await _showColorBlastPicker();
+      if (!mounted) return;
+      if (selectedColor == null) {
+        setState(() {
+          activeBooster = null;
+          praise = 'Aim for a sweet match!';
+        });
+      } else {
+        await _activateColorBlast(selectedColor);
+      }
+      return;
+    }
     setState(() {
       activeBooster = activeBooster == type ? null : type;
       praise = activeBooster == null
           ? 'Aim for a sweet match!'
+          : type == BoosterType.bomb
+          ? 'Bomb ready! Aim and shoot.'
+          : type == BoosterType.rocket
+          ? 'Rocket ready! Aim and shoot.'
           : 'Tap a candy to use ${type.label}!';
     });
   }
 
+  Future<void> _showBoosterPicker(List<BoosterType> boosters) async {
+    if (boosters.isEmpty ||
+        finished ||
+        paused ||
+        rowWarning ||
+        rowAnimating ||
+        colorBlastAnimating ||
+        bombLaunching ||
+        rocketLaunching ||
+        flight != null) {
+      return;
+    }
+    final chosen = await showDialog<BoosterType>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('CHOOSE BOOSTER'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: boosters
+              .map(
+                (type) => ListTile(
+                  leading: Text(
+                    type.emoji,
+                    style: const TextStyle(fontSize: 26),
+                  ),
+                  title: Text(type.label),
+                  trailing: Text('×${widget.model.boosterCount(type)}'),
+                  onTap: () => Navigator.pop(context, type),
+                ),
+              )
+              .toList(),
+        ),
+      ),
+    );
+    if (chosen != null && mounted) await _selectBooster(chosen);
+  }
+
+  Future<CandyColor?> _showColorBlastPicker() {
+    final colors = board
+        .where((cell) => !cell.isBomb && !cell.isMystery)
+        .map((cell) => cell.color)
+        .toSet()
+        .toList();
+    if (colors.isEmpty) return Future.value(null);
+    return showDialog<CandyColor>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => AlertDialog(
+        title: const Text('CHOOSE A COLOR'),
+        content: Wrap(
+          alignment: WrapAlignment.center,
+          spacing: 12,
+          runSpacing: 12,
+          children: colors
+              .map(
+                (color) => InkWell(
+                  borderRadius: BorderRadius.circular(28),
+                  onTap: () => Navigator.pop(context, color),
+                  child: Padding(
+                    padding: const EdgeInsets.all(3),
+                    child: CandyBall(color: color, size: 52),
+                  ),
+                ),
+              )
+              .toList(),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _activateColorBlast(CandyColor color) async {
+    final geometry = activeGeometry;
+    if (geometry == null) {
+      if (mounted) setState(() => activeBooster = null);
+      return;
+    }
+    final targets = board
+        .where((cell) => cell.color == color && !cell.isBomb && !cell.isMystery)
+        .toList();
+    if (targets.isEmpty ||
+        !await widget.model.useBooster(BoosterType.colorBlast) ||
+        !mounted) {
+      if (mounted) setState(() => activeBooster = null);
+      return;
+    }
+    setState(() {
+      colorBlastAnimating = true;
+      colorBlastTargets
+        ..clear()
+        ..addAll(targets.map((cell) => cell.key));
+      activeBooster = null;
+      aimPath = const [];
+      praise = 'COLOR BLAST!';
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 180));
+    if (!mounted) return;
+    setState(() {
+      final mysteryReward = _claimMysteryRewards(targets);
+      _showPop(targets, geometry);
+      board.removeWhere(targets.contains);
+      cleared += targets.length;
+      yellowCleared += targets
+          .where((cell) => cell.color == CandyColor.lemon)
+          .length;
+      combo++;
+      score += targets.length * 15 + 150;
+      praise = mysteryReward ?? 'COLOR BLAST! +${targets.length * 15 + 150}';
+      final dropReward = _dropFloating(geometry, pointsPerCandy: 20);
+      if (dropReward != null) praise = dropReward;
+      if (widget.model.sound) _playPopSound(math.max(6, targets.length));
+      if (widget.model.haptics) HapticFeedback.heavyImpact();
+      if (_objectiveDone) _finish(true);
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 470));
+    if (mounted) {
+      setState(() {
+        colorBlastTargets.clear();
+        colorBlastAnimating = false;
+      });
+    }
+  }
+
   Future<void> _useTargetedBooster(Offset point, BoardGeometry g) async {
     final booster = activeBooster;
-    if (booster == null || board.isEmpty) return;
+    if (booster == null ||
+        board.isEmpty ||
+        rowWarning ||
+        rowAnimating ||
+        colorBlastAnimating ||
+        bombLaunching ||
+        rocketLaunching ||
+        finished ||
+        paused) {
+      return;
+    }
     final target = board.reduce(
       (closest, cell) =>
           (g.position(cell) - point).distance <
@@ -1494,6 +2159,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         BoosterType.lightning =>
           board.where((cell) => cell.row == target.row).toList(),
         BoosterType.rainbow => _colorGroup(target, g),
+        BoosterType.colorBlast => const <CandyCell>[],
+        BoosterType.rocket => const <CandyCell>[],
         BoosterType.goldenAim => const <CandyCell>[],
         BoosterType.extraSwap => const <CandyCell>[],
       };
@@ -1521,8 +2188,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       final cell = pending.removeLast();
       if (result.contains(cell)) continue;
       result.add(cell);
-      for (final neighbor in _neighbors(cell, g)) {
-        if ((neighbor.color == target.color || neighbor.isMystery) &&
+      for (final neighbor in _neighbors(cell)) {
+        if (!neighbor.isBomb &&
+            (neighbor.color == target.color || neighbor.isMystery) &&
             !result.contains(neighbor)) {
           pending.add(neighbor);
         }
@@ -1531,28 +2199,66 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     return result;
   }
 
-  void _shoot(Offset point, BoardGeometry g) {
+  Future<void> _shoot(Offset point, BoardGeometry g) async {
     if (finished ||
         paused ||
         rowWarning ||
         rowAnimating ||
-        activeBooster != null ||
+        colorBlastAnimating ||
+        (activeBooster != null &&
+            activeBooster != BoosterType.bomb &&
+            activeBooster != BoosterType.rocket) ||
         flight != null) {
       return;
     }
     final initial = _velocity(point, g);
     if (initial == null) return;
+    final isBombShot = activeBooster == BoosterType.bomb;
+    final isRocketShot = activeBooster == BoosterType.rocket;
+    if (isBombShot || isRocketShot) {
+      if (isBombShot ? bombLaunching : rocketLaunching) return;
+      if (isBombShot) {
+        bombLaunching = true;
+      } else {
+        rocketLaunching = true;
+      }
+      final used = await widget.model.useBooster(
+        isBombShot ? BoosterType.bomb : BoosterType.rocket,
+      );
+      if (isBombShot) {
+        bombLaunching = false;
+      } else {
+        rocketLaunching = false;
+      }
+      if (!mounted || !used) {
+        if (mounted) {
+          setState(
+            () => praise = isBombShot ? 'No Bombs left!' : 'No Rockets left!',
+          );
+        }
+        return;
+      }
+    }
     if (widget.model.sound) SoundService.instance.playShoot();
     var velocity = initial;
     setState(() {
       final firedColor = current;
-      if (goldenAimShots > 0) goldenAimShots--;
+      if (!isBombShot && !isRocketShot && goldenAimShots > 0) {
+        goldenAimShots--;
+      }
       aimPath = const [];
       aimInput = null;
       _lastAimSample = null;
       flyingColor = firedColor;
-      current = next;
-      next = widget.config.colors[random.nextInt(widget.config.colors.length)];
+      flyingBomb = isBombShot;
+      flyingRocket = isRocketShot;
+      if (isBombShot || isRocketShot) {
+        activeBooster = null;
+      } else {
+        current = next;
+        next =
+            widget.config.colors[random.nextInt(widget.config.colors.length)];
+      }
       shotTrail
         ..clear()
         ..add(g.launcher);
@@ -1591,17 +2297,31 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           velocity = Offset(-velocity.dx, velocity.dy);
           point = previous + velocity;
         }
-        final hit = board.any(
-          (cell) => (g.position(cell) - point).distance < g.ballDiameter,
-        );
-        if (hit || point.dy <= g.top - g.ballDiameter / 2) {
+        final collision = _firstCollision(previous, point, g);
+        if (collision != null) {
           flightTimer?.cancel();
           flightTimer = null;
           flight = null;
           shotTrail.clear();
           final firedColor = flyingColor ?? current;
+          final firedBomb = flyingBomb;
+          final firedRocket = flyingRocket;
           flyingColor = null;
-          _attach(point, g, firedColor);
+          flyingBomb = false;
+          flyingRocket = false;
+          if (firedBomb) {
+            _explodeBomb(collision.position, g);
+          } else if (firedRocket) {
+            _explodeRocket(collision.position, g, collision.cell);
+          } else {
+            _attach(
+              collision.position,
+              g,
+              firedColor,
+              collided: collision.cell,
+              velocity: velocity,
+            );
+          }
         } else {
           flight = point;
         }
@@ -1612,46 +2332,253 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   CandyCell? _attachmentFor(
     Offset impact,
     BoardGeometry g,
-    CandyColor firedColor,
-  ) {
-    final options = <CandyCell>[];
-    for (var row = 0; row <= 14; row++) {
-      for (var col = 0; col < _columnsForRow(row); col++) {
-        if (board.any((cell) => cell.row == row && cell.col == col)) continue;
-        final candidate = CandyCell(row, col, firedColor);
-        if (row == 0 ||
-            board.isEmpty ||
-            board.any((cell) => _touches(candidate, cell, g))) {
-          options.add(candidate);
-        }
+    CandyColor firedColor, {
+    CandyCell? collided,
+    required Offset velocity,
+  }) {
+    // Allow the final legal snap to reach the danger line. The board is then
+    // frozen immediately with that candy still visible behind Game Over;
+    // never delete it just because it caused the loss.
+    final maxRow = math.max(0, ((g.dangerLine - g.top) / g.rowStep).ceil());
+    final coordinates = <(int row, int col)>[];
+    if (collided == null) {
+      // Ceiling contact: only top-row cells are valid places to attach.
+      for (var col = 0; col < _columnsForRow(0); col++) {
+        coordinates.add((0, col));
       }
+    } else {
+      final offsetRow = (collided.row + gridPhase).isOdd;
+      final diagonalColumn = offsetRow ? collided.col + 1 : collided.col - 1;
+      coordinates.addAll([
+        (collided.row, collided.col - 1),
+        (collided.row, collided.col + 1),
+        (collided.row - 1, collided.col),
+        (collided.row - 1, diagonalColumn),
+        (collided.row + 1, collided.col),
+        (collided.row + 1, diagonalColumn),
+      ]);
     }
+
+    final occupied = board.map((cell) => cell.key).toSet();
+    final options = coordinates
+        .where(
+          (cell) =>
+              cell.$1 >= 0 &&
+              cell.$1 <= maxRow &&
+              cell.$2 >= 0 &&
+              cell.$2 < _columnsForRow(cell.$1),
+        )
+        .map((cell) => CandyCell(cell.$1, cell.$2, firedColor))
+        .where((cell) => !occupied.contains(cell.key))
+        .toSet()
+        .toList();
     if (options.isEmpty) return null;
-    options.sort(
-      (a, b) => (g.position(a) - impact).distance.compareTo(
-        (g.position(b) - impact).distance,
-      ),
-    );
+    // Small finger variations around a true centre shot must not make the
+    // candy alternate between the left and right hex slot. Treat a narrow
+    // centre corridor as vertical and resolve it consistently on the board
+    // centre line. Deliberate angled shots still retain their left/right aim.
+    final nearVerticalAim = velocity.dx.abs() <= velocity.dy.abs() * .045;
+    final snapImpact = nearVerticalAim
+        ? Offset(g.launcher.dx, impact.dy)
+        : impact;
+    options.sort((a, b) {
+      final aPosition = g.position(a);
+      final bPosition = g.position(b);
+      final distanceDifference =
+          (aPosition - snapImpact).distanceSquared -
+          (bPosition - snapImpact).distanceSquared;
+      if (distanceDifference.abs() > .01) {
+        return distanceDifference < 0 ? -1 : 1;
+      }
+      // Only true geometric ties reach here. Use the travel direction so
+      // left and right shots cannot always resolve toward one fixed column.
+      if (!nearVerticalAim && velocity.dx.abs() > .01) {
+        return velocity.dx < 0
+            ? aPosition.dx.compareTo(bPosition.dx)
+            : bPosition.dx.compareTo(aPosition.dx);
+      }
+      // A vertical shot prefers the candidate closest to the board centre.
+      final aCenterDistance = (aPosition.dx - g.launcher.dx).abs();
+      final bCenterDistance = (bPosition.dx - g.launcher.dx).abs();
+      if ((aCenterDistance - bCenterDistance).abs() > .01) {
+        return aCenterDistance.compareTo(bCenterDistance);
+      }
+      return a.key.compareTo(b.key);
+    });
     return options.first;
   }
 
-  void _attach(Offset impact, BoardGeometry g, CandyColor firedColor) {
-    final added = _attachmentFor(impact, g, firedColor);
+  /// Hex-grid distance derived from the staggered row/column coordinates.
+  /// This is intentionally independent of pixel positions and animation.
+  double _gridDistance(CandyCell first, CandyCell second) {
+    double axialQ(CandyCell cell) {
+      final offset = (cell.row + gridPhase).isOdd ? .5 : 0.0;
+      return cell.col + offset - cell.row * .5;
+    }
+
+    final firstQ = axialQ(first);
+    final secondQ = axialQ(second);
+    final dq = firstQ - secondQ;
+    final dr = (first.row - second.row).toDouble();
+    final ds = -dq - dr;
+    return math.max(dq.abs(), math.max(dr.abs(), ds.abs()));
+  }
+
+  List<CandyCell> _bombBlast(CandyCell impact, double radius) {
+    final destroyed = <CandyCell>{};
+    final triggeredBombs = <String>{};
+    final pending = <CandyCell>[impact];
+
+    while (pending.isNotEmpty) {
+      final center = pending.removeLast();
+      // A projectile starts a blast at any candy. Board bomb candies start
+      // another blast only once, preventing an infinite chain.
+      if (center.isBomb && !triggeredBombs.add(center.key)) continue;
+      final inRadius = board
+          .where((cell) => _gridDistance(center, cell) <= radius + .001)
+          .toList();
+      destroyed.addAll(inRadius);
+      for (final bomb in inRadius.where((cell) => cell.isBomb)) {
+        if (!triggeredBombs.contains(bomb.key)) pending.add(bomb);
+      }
+    }
+    return destroyed.toList();
+  }
+
+  void _explodeBomb(Offset impact, BoardGeometry g) {
+    if (board.isEmpty) {
+      _countShotForIncomingRow();
+      return;
+    }
+    final target = board.reduce(
+      (closest, cell) =>
+          (g.position(cell) - impact).distance <
+              (g.position(closest) - impact).distance
+          ? cell
+          : closest,
+    );
+    bombExplosion = g.position(target);
+    bombController.forward(from: 0);
+    final removed = _bombBlast(target, widget.config.bombRadius);
+    shots--;
+
+    if (removed.isEmpty) {
+      combo = 0;
+      praise = 'Bomb missed!';
+      _countShotForIncomingRow();
+      return;
+    }
+
+    final mysteryReward = _claimMysteryRewards(removed);
+    _showPop(removed, g);
+    board.removeWhere(removed.contains);
+    cleared += removed.length;
+    yellowCleared += removed
+        .where((cell) => cell.color == CandyColor.lemon)
+        .length;
+    combo++;
+    score += removed.length * 15 + math.max(0, combo - 1) * 15;
+    final dropReward = _dropFloating(g, pointsPerCandy: 20);
+    final totalCleared = removed.length;
+    praise =
+        mysteryReward ??
+        (totalCleared >= 10
+            ? 'CANDY AVALANCHE!'
+            : totalCleared >= 6
+            ? 'SWEET BLAST!'
+            : 'BOOM! +${removed.length * 15}');
+    if (dropReward != null) praise = dropReward;
+    if (widget.model.sound) _playPopSound(math.max(6, removed.length));
+    if (widget.model.haptics) HapticFeedback.heavyImpact();
+
+    if (_objectiveDone) {
+      _finish(true);
+    } else if (shots <= 0) {
+      _finish(false);
+    } else if (_dangerReached(g)) {
+      praise = 'DANGER ZONE! Try again!';
+      _finish(false);
+    }
+  }
+
+  void _explodeRocket(Offset impact, BoardGeometry g, CandyCell? collided) {
+    if (board.isEmpty) return;
+    final target =
+        collided ??
+        board.reduce(
+          (closest, cell) =>
+              (g.position(cell) - impact).distance <
+                  (g.position(closest) - impact).distance
+              ? cell
+              : closest,
+        );
+    final removed = board.where((cell) => cell.row == target.row).toList();
+    if (removed.isEmpty) return;
+
+    rocketBlastY = g.position(target).dy;
+    rocketController.forward(from: 0);
+    shots--;
+    _showPop(removed, g);
+    board.removeWhere(removed.contains);
+    cleared += removed.length;
+    yellowCleared += removed
+        .where((cell) => cell.color == CandyColor.lemon)
+        .length;
+    combo++;
+    score += removed.length * 20 + math.max(0, combo - 1) * 20;
+    praise = removed.length >= 6 ? 'ROCKET BLAST!' : 'Rocket cleared a row!';
+    final dropReward = _dropFloating(g, pointsPerCandy: 30);
+    if (dropReward != null) praise = dropReward;
+    if (widget.model.sound) _playPopSound(math.max(6, removed.length));
+    if (widget.model.haptics) HapticFeedback.heavyImpact();
+    if (_objectiveDone) {
+      _finish(true);
+    } else if (shots <= 0) {
+      _finish(false);
+    } else if (_dangerReached(g)) {
+      praise = 'DANGER ZONE! Try again!';
+      _finish(false);
+    }
+  }
+
+  void _attach(
+    Offset impact,
+    BoardGeometry g,
+    CandyColor firedColor, {
+    CandyCell? collided,
+    required Offset velocity,
+  }) {
+    final added = _attachmentFor(
+      impact,
+      g,
+      firedColor,
+      collided: collided,
+      velocity: velocity,
+    );
     shots--;
     if (added == null) {
-      praise = 'The board is full. Try again!';
-      if (shots <= 0) _finish(false);
+      praise = 'DANGER ZONE! Try again!';
+      _finish(false);
       return;
     }
     board.add(added);
+    // Danger is checked before matching or floating-candy logic. This keeps
+    // the exact loss-making formation on screen rather than popping/removing
+    // any candies after the line has been crossed.
+    if (_dangerReached(g)) {
+      praise = 'DANGER ZONE! Try again!';
+      _finish(false);
+      return;
+    }
     final group = <CandyCell>[];
     final pending = <CandyCell>[added];
     while (pending.isNotEmpty) {
       final cell = pending.removeLast();
       if (group.contains(cell)) continue;
       group.add(cell);
-      for (final neighbor in _neighbors(cell, g)) {
-        if ((neighbor.color == added.color || neighbor.isMystery) &&
+      for (final neighbor in _neighbors(cell)) {
+        if (!neighbor.isBomb &&
+            (neighbor.color == added.color || neighbor.isMystery) &&
             !group.contains(neighbor)) {
           pending.add(neighbor);
         }
@@ -1682,8 +2609,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       _finish(true);
     } else if (shots <= 0) {
       _finish(false);
-    } else if (widget.config.newRowEnabled && _dangerReached(g)) {
-      praise = 'TOO CLOSE! Clear some candies!';
+    } else if (_dangerReached(g)) {
+      praise = 'DANGER ZONE! Try again!';
       _finish(false);
     } else {
       if (!matched) _countShotForIncomingRow();
@@ -1697,26 +2624,69 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     _queueIncomingRow();
   }
 
-  List<CandyCell> _generateCandyRow() => List<CandyCell>.generate(
-    _columnsForRow(0, phase: gridPhase - 1),
-    (col) => CandyCell(
-      0,
-      col,
-      widget.config.colors[(rowsEntered + col) % widget.config.colors.length],
-    ),
-  );
+  List<CandyCell> _generateCandyRow() {
+    final columns = _columnsForRow(0, phase: gridPhase - 1);
+    final configuredSize = widget.config.newRowSize;
+    final size =
+        (configuredSize == 0 ? columns : configuredSize.clamp(1, columns))
+            .toInt();
+    final firstColumn = (columns - size) ~/ 2;
+
+    return List<CandyCell>.generate(size, (index) {
+      final col = firstColumn + index;
+      return CandyCell(
+        0,
+        col,
+        widget.config.colors[(rowsEntered + col) % widget.config.colors.length],
+        isMystery:
+            widget.config.newRowSpecialChance > 0 &&
+            random.nextDouble() < widget.config.newRowSpecialChance,
+      );
+    });
+  }
 
   void _queueIncomingRow() {
+    if (finished || rowWarning || rowAnimating) return;
+    final geometry = activeGeometry;
+    // Do not insert a row that would make the board cross the fixed danger
+    // boundary. This prevents visual overlap with the shooter controls.
+    if (geometry != null && _wouldReachDangerAfterIncomingRow(geometry)) {
+      setState(() => praise = 'TOO CLOSE! Clear some candies!');
+      _finish(false);
+      return;
+    }
     incomingRow
       ..clear()
       ..addAll(_generateCandyRow());
-    rowWarning = true;
-    aimPath = const [];
-    praise = 'NEW CANDIES!';
+    setState(() {
+      rowWarning = true;
+      aimPath = const [];
+      praise = 'CEILING DROP!';
+    });
     rowTimer?.cancel();
-    rowTimer = Timer(const Duration(milliseconds: 360), () {
+    rowTimer = Timer(const Duration(milliseconds: 160), () {
       if (!mounted || finished) return;
       setState(() {
+        movingBoard
+          ..clear()
+          ..addAll(board);
+        // Commit the logical ceiling movement before rendering it. Gameplay is
+        // locked during this animation, so every system sees one consistent
+        // staggered grid while the old positions glide to their new rows.
+        board
+          ..clear()
+          ..addAll(incomingRow)
+          ..addAll(
+            movingBoard.map(
+              (cell) => CandyCell(
+                cell.row + 1,
+                cell.col,
+                cell.color,
+                isMystery: cell.isMystery,
+                isBomb: cell.isBomb,
+              ),
+            ),
+          );
         rowWarning = false;
         rowAnimating = true;
       });
@@ -1725,22 +2695,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   }
 
   void _settleIncomingRow() {
-    final nextBoard = <CandyCell>[
-      ...incomingRow,
-      ...board.map(
-        (cell) => CandyCell(
-          cell.row + 1,
-          cell.col,
-          cell.color,
-          isMystery: cell.isMystery,
-        ),
-      ),
-    ];
     setState(() {
-      board
-        ..clear()
-        ..addAll(nextBoard);
       incomingRow.clear();
+      movingBoard.clear();
       rowAnimating = false;
       rowShotCounter = 0;
       rowsEntered++;
@@ -1757,6 +2714,24 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
   bool _dangerReached(BoardGeometry g) => board.any(
     (cell) => g.position(cell).dy + g.ballDiameter / 2 >= g.dangerLine,
+  );
+
+  bool _wouldReachDangerAfterIncomingRow(BoardGeometry g) => board.any(
+    (cell) =>
+        g
+                .position(
+                  CandyCell(
+                    cell.row + 1,
+                    cell.col,
+                    cell.color,
+                    isMystery: cell.isMystery,
+                    isBomb: cell.isBomb,
+                  ),
+                  phase: gridPhase - 1,
+                )
+                .dy +
+            g.ballDiameter / 2 >=
+        g.dangerLine,
   );
 
   Future<void> _showRowTutorial() async {
@@ -1799,14 +2774,14 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     );
   }
 
-  String? _dropFloating(BoardGeometry g) {
+  String? _dropFloating(BoardGeometry g, {int pointsPerCandy = 15}) {
     final connected = <CandyCell>[];
     final pending = board.where((cell) => cell.row == 0).toList();
     while (pending.isNotEmpty) {
       final cell = pending.removeLast();
       if (connected.contains(cell)) continue;
       connected.add(cell);
-      for (final neighbor in _neighbors(cell, g)) {
+      for (final neighbor in _neighbors(cell)) {
         if (!connected.contains(neighbor)) pending.add(neighbor);
       }
     }
@@ -1819,8 +2794,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       yellowCleared += dropped
           .where((cell) => cell.color == CandyColor.lemon)
           .length;
-      score += dropped.length * 15;
-      return mysteryReward ?? 'Sweet drop +${dropped.length * 15}!';
+      score += dropped.length * pointsPerCandy;
+      return mysteryReward ?? 'Sweet drop +${dropped.length * pointsPerCandy}!';
     }
     return null;
   }
@@ -1958,13 +2933,21 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     popController.dispose();
     dropController.dispose();
     rowController.dispose();
+    bombController.dispose();
+    rocketController.dispose();
     super.dispose();
   }
 
   Offset _displayPosition(CandyCell cell, BoardGeometry g) {
     if (!rowAnimating) return g.position(cell);
     final target = g.position(
-      CandyCell(cell.row + 1, cell.col, cell.color),
+      CandyCell(
+        cell.row + 1,
+        cell.col,
+        cell.color,
+        isMystery: cell.isMystery,
+        isBomb: cell.isBomb,
+      ),
       phase: gridPhase - 1,
     );
     return Offset.lerp(
@@ -1974,457 +2957,554 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     )!;
   }
 
+  Widget _boardCandy(CandyCell cell, double size) {
+    final candy = cell.isBomb
+        ? BombCandy(size: size)
+        : cell.isMystery
+        ? MysteryCandy(size: size)
+        : CandyBall(color: cell.color, size: size);
+    if (!colorBlastTargets.contains(cell.key)) return candy;
+    return SizedBox.square(
+      dimension: size,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned.fill(child: candy),
+          Positioned.fill(
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 2.5),
+                  boxShadow: [
+                    BoxShadow(
+                      color: cell.color.color.withValues(alpha: .9),
+                      blurRadius: 14,
+                      spreadRadius: 3,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) => GradientScaffold(
     playfield: true,
     child: SafeArea(
-      child: Column(
+      child: Stack(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-            child: Row(
-              children: [
-                RoundIcon(Icons.arrow_back_rounded, widget.onExit),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    children: [
-                      Text(
-                        'LEVEL ${widget.config.id}',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w900,
-                        ),
+          Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 4, 10, 5),
+                child: GameTopHud(
+                  level: widget.config.id,
+                  score: score,
+                  stars: _earnedStars,
+                  coins: widget.model.coins,
+                  onExit: widget.onExit,
+                  onPause: _showPause,
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 6, 14, 10),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: GameStatusCard(
+                        icon: Icons.track_changes_rounded,
+                        label: widget.config.objective == ObjectiveType.clear
+                            ? 'Clear goal'
+                            : 'Clear all',
+                        value: widget.config.objective == ObjectiveType.clear
+                            ? '$cleared / ${widget.config.target}'
+                            : '${board.length} left',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: GameStatusCard(
+                        icon: Icons.auto_awesome_rounded,
+                        label: 'Shots',
+                        value: '$shots',
+                      ),
+                    ),
+                    if (widget.config.newRowEnabled) ...[
+                      const SizedBox(width: 8),
+                      MissCounterIndicator(
+                        misses: rowShotCounter,
+                        threshold: widget.config.newRowInterval,
+                        dropping: rowWarning || rowAnimating,
                       ),
                     ],
-                  ),
+                  ],
                 ),
-                RoundIcon(Icons.pause_rounded, _showPause),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 6, 14, 10),
-            child: Row(
-              children: [
-                Expanded(
-                  child: GameStatusCard(
-                    icon: Icons.track_changes_rounded,
-                    label: widget.config.objective == ObjectiveType.clear
-                        ? 'Clear goal'
-                        : 'Clear all',
-                    value: widget.config.objective == ObjectiveType.clear
-                        ? '$cleared / ${widget.config.target}'
-                        : '${board.length} left',
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: GameStatusCard(
-                    icon: Icons.auto_awesome_rounded,
-                    label: 'Shots',
-                    value: '$shots',
-                  ),
-                ),
-                if (widget.config.newRowEnabled) ...[
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: GameStatusCard(
-                      icon: Icons.vertical_align_bottom_rounded,
-                      label: 'Row in',
-                      value: rowWarning || rowAnimating
-                          ? 'NOW!'
-                          : '${math.max(0, widget.config.newRowInterval - rowShotCounter)}',
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          Expanded(
-            child: LayoutBuilder(
-              builder: (_, constraints) {
-                final g = BoardGeometry(
-                  constraints.biggest,
-                  gridPhase: gridPhase,
-                );
-                activeGeometry = g;
-                final candySize = g.ballDiameter;
-                final availableBoosters = BoosterType.values
-                    .where(
-                      (type) =>
-                          type != BoosterType.extraSwap &&
-                          widget.model.boosterCount(type) > 0,
-                    )
-                    .toList();
-                final shownBooster = availableBoosters.isEmpty
-                    ? null
-                    : availableBoosters.first;
-                return GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTapDown: (details) => _updateAim(details.localPosition, g),
-                  onTapUp: (details) => activeBooster == null
-                      ? _shoot(details.localPosition, g)
-                      : _useTargetedBooster(details.localPosition, g),
-                  onPanStart: (details) => _updateAim(details.localPosition, g),
-                  onPanUpdate: (details) =>
-                      _updateAim(details.localPosition, g),
-                  onPanEnd: (_) {
-                    if (aimInput != null) _shoot(aimInput!, g);
-                  },
-                  child: Stack(
-                    children: [
-                      Positioned.fill(
-                        child: CustomPaint(painter: AimPainter(path: aimPath)),
-                      ),
-                      if (widget.config.newRowEnabled)
-                        Positioned(
-                          left: g.wallLeft,
-                          right: g.size.width - g.wallRight,
-                          top: g.dangerLine - 17,
-                          child: IgnorePointer(
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: Container(
-                                    height: 3,
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xffff6b9b),
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                  ),
-                                ),
-                                Container(
-                                  margin: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                  ),
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 13,
-                                    vertical: 6,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xfff6538a),
-                                    borderRadius: BorderRadius.circular(16),
-                                    border: Border.all(
-                                      color: const Color(0xffffb6d1),
-                                      width: 1.5,
-                                    ),
-                                  ),
-                                  child: const Text(
-                                    'DANGER ZONE',
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 10,
-                                      letterSpacing: .4,
-                                      fontWeight: FontWeight.w900,
-                                    ),
-                                  ),
-                                ),
-                                Expanded(
-                                  child: Container(
-                                    height: 3,
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xffff6b9b),
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                  ),
-                                ),
-                              ],
+              ),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (_, constraints) {
+                    final g = BoardGeometry(
+                      constraints.biggest,
+                      gridPhase: gridPhase,
+                    );
+                    activeGeometry = g;
+                    final candySize = g.ballDiameter;
+                    final availableBoosters = BoosterType.values
+                        .where(
+                          (type) =>
+                              type != BoosterType.extraSwap &&
+                              widget.model.boosterCount(type) > 0,
+                        )
+                        .toList();
+                    final shownBooster =
+                        activeBooster ??
+                        (availableBoosters.isEmpty
+                            ? null
+                            : availableBoosters.first);
+                    return GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTapDown: (details) =>
+                          _updateAim(details.localPosition, g),
+                      onTapUp: (details) =>
+                          activeBooster == null ||
+                              activeBooster == BoosterType.bomb ||
+                              activeBooster == BoosterType.rocket
+                          ? _shoot(details.localPosition, g)
+                          : _useTargetedBooster(details.localPosition, g),
+                      onPanStart: (details) =>
+                          _updateAim(details.localPosition, g),
+                      onPanUpdate: (details) =>
+                          _updateAim(details.localPosition, g),
+                      onPanEnd: (_) {
+                        if (aimInput != null) _shoot(aimInput!, g);
+                      },
+                      child: Stack(
+                        children: [
+                          Positioned.fill(
+                            child: CustomPaint(
+                              painter: AimPainter(path: aimPath),
                             ),
                           ),
-                        ),
-                      AnimatedBuilder(
-                        animation: rowController,
-                        builder: (_, __) => Stack(
-                          children: [
-                            ...board.map((cell) {
-                              final position = _displayPosition(cell, g);
-                              return Positioned(
-                                left: position.dx - candySize / 2,
-                                top: position.dy - candySize / 2,
-                                child: cell.isMystery
-                                    ? MysteryCandy(size: candySize)
-                                    : CandyBall(
-                                        color: cell.color,
-                                        size: candySize,
+                          Positioned(
+                            left: g.wallLeft,
+                            right: g.size.width - g.wallRight,
+                            top: g.dangerLine - 17,
+                            child: IgnorePointer(
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Container(
+                                      height: 3,
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xffff6b9b),
+                                        borderRadius: BorderRadius.circular(4),
                                       ),
-                              );
-                            }),
-                            if (rowAnimating)
-                              ...incomingRow.map((cell) {
-                                final target = g.position(
-                                  cell,
-                                  phase: gridPhase - 1,
-                                );
-                                final progress = Curves.easeOut.transform(
-                                  rowController.value,
-                                );
-                                final position = Offset.lerp(
-                                  target - Offset(0, g.rowStep),
-                                  target,
-                                  progress,
-                                )!;
-                                return Positioned(
-                                  left: position.dx - candySize / 2,
-                                  top: position.dy - candySize / 2,
-                                  child: cell.isMystery
-                                      ? MysteryCandy(size: candySize)
-                                      : CandyBall(
-                                          color: cell.color,
-                                          size: candySize,
-                                        ),
-                                );
-                              }),
-                          ],
-                        ),
-                      ),
-                      ...dropEffects.map(
-                        (effect) => Positioned(
-                          left: effect.position.dx - effect.size / 2,
-                          top: effect.position.dy - effect.size / 2,
-                          child: IgnorePointer(
-                            child: FallingCandyEffect(
-                              effect: effect,
-                              animation: dropController,
-                            ),
-                          ),
-                        ),
-                      ),
-                      if (rowWarning || rowAnimating)
-                        Positioned(
-                          left: 0,
-                          right: 0,
-                          top: math.max(4, g.top - 12),
-                          child: IgnorePointer(
-                            child: Center(
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 14,
-                                  vertical: 7,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xfff65371),
-                                  borderRadius: BorderRadius.circular(18),
-                                  border: Border.all(
-                                    color: Colors.white,
-                                    width: 2,
-                                  ),
-                                ),
-                                child: const Text(
-                                  '⚠ NEW CANDIES!',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w900,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ...popEffects.map(
-                        (effect) => Positioned(
-                          left: effect.position.dx - effect.size / 2,
-                          top: effect.position.dy - effect.size / 2,
-                          child: IgnorePointer(
-                            child: PopCandyEffect(
-                              effect: effect,
-                              animation: popController,
-                            ),
-                          ),
-                        ),
-                      ),
-                      ...shotSparks.map(
-                        (spark) => Positioned(
-                          left: spark.position.dx - 7,
-                          top: spark.position.dy - 7,
-                          child: IgnorePointer(
-                            child: Opacity(
-                              opacity: spark.life.clamp(0, 1),
-                              child: const Icon(
-                                Icons.auto_awesome_rounded,
-                                color: Color(0xfffff0a6),
-                                size: 14,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      ...shotTrail.asMap().entries.map((entry) {
-                        final fade =
-                            (shotTrail.length - entry.key) /
-                            (shotTrail.length + 1);
-                        final diameter = candySize * (.16 + fade * .20);
-                        return Positioned(
-                          left: entry.value.dx - diameter / 2,
-                          top: entry.value.dy - diameter / 2,
-                          child: IgnorePointer(
-                            child: Container(
-                              width: diameter,
-                              height: diameter,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: (flyingColor ?? current).color
-                                    .withValues(alpha: fade * .55),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.white.withValues(
-                                      alpha: fade * .65,
                                     ),
-                                    blurRadius: 5,
+                                  ),
+                                  Container(
+                                    margin: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                    ),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 13,
+                                      vertical: 6,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xfff6538a),
+                                      borderRadius: BorderRadius.circular(16),
+                                      border: Border.all(
+                                        color: const Color(0xffffb6d1),
+                                        width: 1.5,
+                                      ),
+                                    ),
+                                    child: const Text(
+                                      'DANGER ZONE',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 10,
+                                        letterSpacing: .4,
+                                        fontWeight: FontWeight.w900,
+                                      ),
+                                    ),
+                                  ),
+                                  Expanded(
+                                    child: Container(
+                                      height: 3,
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xffff6b9b),
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                    ),
                                   ),
                                 ],
                               ),
                             ),
                           ),
-                        );
-                      }),
-                      if (flight != null)
-                        Positioned(
-                          left: flight!.dx - candySize / 2,
-                          top: flight!.dy - candySize / 2,
-                          child: AnimatedBuilder(
-                            animation: launchController,
-                            builder: (_, child) => Transform.scale(
-                              scale:
-                                  1 +
-                                  .13 *
-                                      (1 -
-                                          Curves.easeOut.transform(
-                                            launchController.value,
-                                          )),
-                              child: child,
-                            ),
-                            child: CandyBall(
-                              color: flyingColor ?? current,
-                              size: candySize,
-                            ),
-                          ),
-                        ),
-                      Positioned(
-                        left: 24,
-                        right: 24,
-                        bottom: 8,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 12,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(
-                              0xff9b5ad0,
-                            ).withValues(alpha: .9),
-                            borderRadius: BorderRadius.circular(24),
-                            border: Border.all(
-                              color: const Color(0xffffb3d1),
-                              width: 2,
+                          AnimatedBuilder(
+                            animation: rowController,
+                            builder: (_, __) => Stack(
+                              children: [
+                                ...(rowAnimating ? movingBoard : board).map((
+                                  cell,
+                                ) {
+                                  final position = _displayPosition(cell, g);
+                                  return Positioned(
+                                    left: position.dx - candySize / 2,
+                                    top: position.dy - candySize / 2,
+                                    child: _boardCandy(cell, candySize),
+                                  );
+                                }),
+                                if (rowAnimating)
+                                  ...incomingRow.map((cell) {
+                                    final target = g.position(
+                                      cell,
+                                      phase: gridPhase - 1,
+                                    );
+                                    final progress = Curves.easeOut.transform(
+                                      rowController.value,
+                                    );
+                                    final position = Offset.lerp(
+                                      target - Offset(0, g.rowStep),
+                                      target,
+                                      progress,
+                                    )!;
+                                    return Positioned(
+                                      left: position.dx - candySize / 2,
+                                      top: position.dy - candySize / 2,
+                                      child: _boardCandy(cell, candySize),
+                                    );
+                                  }),
+                              ],
                             ),
                           ),
-                          child: Text(
-                            praise,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w900,
-                              fontSize: 16,
-                            ),
-                          ),
-                        ),
-                      ),
-                      Positioned(
-                        left: g.launcher.dx - candySize * .68,
-                        bottom: 72,
-                        child: AnimatedBuilder(
-                          animation: launchController,
-                          builder: (_, child) {
-                            final recoil =
-                                math.sin(launchController.value * math.pi) * 9;
-                            return Transform.translate(
-                              offset: Offset(0, recoil),
-                              child: Transform.scale(
-                                scale:
-                                    1 +
-                                    math.sin(launchController.value * math.pi) *
-                                        .055,
-                                child: child,
-                              ),
-                            );
-                          },
-                          child: LollipopLauncher(
-                            color: current,
-                            size: candySize * 1.36,
-                          ),
-                        ),
-                      ),
-                      Positioned(
-                        right: 14,
-                        bottom: 88,
-                        child: CandySlotCard(
-                          label: 'NEXT',
-                          onTap: _swapNextCandy,
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              CandyBall(color: next, size: candySize * .72),
-                              const SizedBox(height: 2),
-                              Text(
-                                freeSwaps > 0
-                                    ? 'FREE SWAP'
-                                    : 'SWAPS ×${widget.model.extraSwapBoosters}',
-                                style: const TextStyle(
-                                  color: Color(0xfff6538a),
-                                  fontSize: 8,
-                                  fontWeight: FontWeight.w900,
+                          ...dropEffects.map(
+                            (effect) => Positioned(
+                              left: effect.position.dx - effect.size / 2,
+                              top: effect.position.dy - effect.size / 2,
+                              child: IgnorePointer(
+                                child: FallingCandyEffect(
+                                  effect: effect,
+                                  animation: dropController,
                                 ),
                               ),
-                            ],
+                            ),
                           ),
-                        ),
+                          if (rowWarning || rowAnimating)
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              top: math.max(4, g.top - 12),
+                              child: IgnorePointer(
+                                child: Center(
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 14,
+                                      vertical: 7,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xfff65371),
+                                      borderRadius: BorderRadius.circular(18),
+                                      border: Border.all(
+                                        color: Colors.white,
+                                        width: 2,
+                                      ),
+                                    ),
+                                    child: const Text(
+                                      'CEILING DROP!',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w900,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ...popEffects.map(
+                            (effect) => Positioned(
+                              left: effect.position.dx - effect.size / 2,
+                              top: effect.position.dy - effect.size / 2,
+                              child: IgnorePointer(
+                                child: PopCandyEffect(
+                                  effect: effect,
+                                  animation: popController,
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (bombExplosion != null)
+                            Positioned(
+                              left: bombExplosion!.dx - candySize * 2,
+                              top: bombExplosion!.dy - candySize * 2,
+                              child: IgnorePointer(
+                                child: BombBlastEffect(
+                                  size: candySize * 4,
+                                  animation: bombController,
+                                ),
+                              ),
+                            ),
+                          if (rocketBlastY != null)
+                            Positioned(
+                              left: g.wallLeft,
+                              right: g.size.width - g.wallRight,
+                              top: rocketBlastY! - candySize * .5,
+                              child: IgnorePointer(
+                                child: RocketRowBlastEffect(
+                                  height: candySize,
+                                  animation: rocketController,
+                                ),
+                              ),
+                            ),
+                          ...shotSparks.map(
+                            (spark) => Positioned(
+                              left: spark.position.dx - 7,
+                              top: spark.position.dy - 7,
+                              child: IgnorePointer(
+                                child: Opacity(
+                                  opacity: spark.life.clamp(0, 1),
+                                  child: const Icon(
+                                    Icons.auto_awesome_rounded,
+                                    color: Color(0xfffff0a6),
+                                    size: 14,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          ...shotTrail.asMap().entries.map((entry) {
+                            final fade =
+                                (shotTrail.length - entry.key) /
+                                (shotTrail.length + 1);
+                            final diameter = candySize * (.16 + fade * .20);
+                            return Positioned(
+                              left: entry.value.dx - diameter / 2,
+                              top: entry.value.dy - diameter / 2,
+                              child: IgnorePointer(
+                                child: Container(
+                                  width: diameter,
+                                  height: diameter,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color:
+                                        (flyingBomb
+                                                ? const Color(0xff3d3146)
+                                                : flyingRocket
+                                                ? const Color(0xffff7a55)
+                                                : (flyingColor ?? current)
+                                                      .color)
+                                            .withValues(alpha: fade * .55),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.white.withValues(
+                                          alpha: fade * .65,
+                                        ),
+                                        blurRadius: 5,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          }),
+                          if (flight != null)
+                            Positioned(
+                              left: flight!.dx - candySize / 2,
+                              top: flight!.dy - candySize / 2,
+                              child: AnimatedBuilder(
+                                animation: launchController,
+                                builder: (_, child) => Transform.scale(
+                                  scale:
+                                      1 +
+                                      .13 *
+                                          (1 -
+                                              Curves.easeOut.transform(
+                                                launchController.value,
+                                              )),
+                                  child: child,
+                                ),
+                                child: flyingBomb
+                                    ? BombCandy(size: candySize)
+                                    : flyingRocket
+                                    ? RocketCandy(size: candySize)
+                                    : CandyBall(
+                                        color: flyingColor ?? current,
+                                        size: candySize,
+                                      ),
+                              ),
+                            ),
+                          Positioned(
+                            left: 24,
+                            right: 24,
+                            bottom: 8,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 12,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(
+                                  0xff9b5ad0,
+                                ).withValues(alpha: .9),
+                                borderRadius: BorderRadius.circular(24),
+                                border: Border.all(
+                                  color: const Color(0xffffb3d1),
+                                  width: 2,
+                                ),
+                              ),
+                              child: Text(
+                                praise,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 16,
+                                ),
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            left: g.launcher.dx - candySize * .68,
+                            bottom: 72,
+                            child: AnimatedBuilder(
+                              animation: launchController,
+                              builder: (_, child) {
+                                final recoil =
+                                    math.sin(launchController.value * math.pi) *
+                                    9;
+                                return Transform.translate(
+                                  offset: Offset(0, recoil),
+                                  child: Transform.scale(
+                                    scale:
+                                        1 +
+                                        math.sin(
+                                              launchController.value * math.pi,
+                                            ) *
+                                            .055,
+                                    child: child,
+                                  ),
+                                );
+                              },
+                              child: LollipopLauncher(
+                                color: current,
+                                size: candySize * 1.36,
+                                isBomb: activeBooster == BoosterType.bomb,
+                                isRocket: activeBooster == BoosterType.rocket,
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            right: 14,
+                            bottom: 88,
+                            child: CandySlotCard(
+                              label: 'NEXT',
+                              onTap: _swapNextCandy,
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  CandyBall(color: next, size: candySize * .72),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    freeSwaps > 0
+                                        ? 'FREE SWAP'
+                                        : 'SWAPS ×${widget.model.extraSwapBoosters}',
+                                    style: const TextStyle(
+                                      color: Color(0xfff6538a),
+                                      fontSize: 8,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            left: 14,
+                            bottom: 88,
+                            child: BoosterSlotCard(
+                              type: shownBooster,
+                              count: shownBooster == null
+                                  ? 0
+                                  : widget.model.boosterCount(shownBooster),
+                              selected: activeBooster == shownBooster,
+                              onTap: shownBooster == null
+                                  ? null
+                                  : () => _showBoosterPicker(availableBoosters),
+                            ),
+                          ),
+                          if (finished && !showFullScreenResultOverlay)
+                            ResultOverlay(
+                              won: won,
+                              candiesCleared: cleared,
+                              stars: _earnedStars,
+                              score: score,
+                              coinsEarned: won ? 15 + _earnedStars * 10 : 0,
+                              goal:
+                                  widget.config.objective == ObjectiveType.clear
+                                  ? 'Reach ${widget.config.target} candies'
+                                  : 'Clear all the candies',
+                              chapterName: chapterComplete
+                                  ? completedChapter!.name.toUpperCase()
+                                  : null,
+                              chapterReward: chapterComplete
+                                  ? '${completedChapter!.reward.emoji} ${completedChapter!.reward.label.toUpperCase()} ×${completedChapter!.rewardAmount}\n🪙 +${completedChapter!.coinReward} COINS'
+                                  : null,
+                              onPrimary: won
+                                  ? chapterComplete
+                                        ? () async {
+                                            await widget.model
+                                                .claimChapterReward(
+                                                  completedChapter!,
+                                                );
+                                            widget.onExit();
+                                          }
+                                        : widget.onNext
+                                  : () => setState(_newLevel),
+                              onReplay: () => setState(_newLevel),
+                              onSecondary: widget.onExit,
+                            ),
+                        ],
                       ),
-                      Positioned(
-                        left: 14,
-                        bottom: 88,
-                        child: BoosterSlotCard(
-                          type: shownBooster,
-                          count: shownBooster == null
-                              ? 0
-                              : widget.model.boosterCount(shownBooster),
-                          selected: activeBooster == shownBooster,
-                          onTap: shownBooster == null
-                              ? null
-                              : () => _selectBooster(shownBooster),
-                        ),
-                      ),
-                      if (finished)
-                        ResultOverlay(
-                          won: won,
-                          candiesCleared: cleared,
-                          stars: _earnedStars,
-                          chapterName: chapterComplete
-                              ? completedChapter!.name.toUpperCase()
-                              : null,
-                          chapterReward: chapterComplete
-                              ? '${completedChapter!.reward.emoji} ${completedChapter!.reward.label.toUpperCase()} ×${completedChapter!.rewardAmount}\n🪙 +${completedChapter!.coinReward} COINS'
-                              : null,
-                          onPrimary: won
-                              ? chapterComplete
-                                    ? () async {
-                                        await widget.model.claimChapterReward(
-                                          completedChapter!,
-                                        );
-                                        widget.onExit();
-                                      }
-                                    : widget.onNext
-                              : () => setState(_newLevel),
-                          onSecondary: widget.onExit,
-                        ),
-                    ],
-                  ),
-                );
-              },
-            ),
+                    );
+                  },
+                ),
+              ),
+            ],
           ),
+          if (finished && showFullScreenResultOverlay)
+            ResultOverlay(
+              won: won,
+              candiesCleared: cleared,
+              stars: _earnedStars,
+              score: score,
+              coinsEarned: won ? 15 + _earnedStars * 10 : 0,
+              goal: widget.config.objective == ObjectiveType.clear
+                  ? 'Reach ${widget.config.target} candies'
+                  : 'Clear all the candies',
+              chapterName: chapterComplete
+                  ? completedChapter!.name.toUpperCase()
+                  : null,
+              chapterReward: chapterComplete
+                  ? '${completedChapter!.reward.label.toUpperCase()} x${completedChapter!.rewardAmount}\n+${completedChapter!.coinReward} COINS'
+                  : null,
+              onPrimary: won
+                  ? chapterComplete
+                        ? () async {
+                            await widget.model.claimChapterReward(
+                              completedChapter!,
+                            );
+                            widget.onExit();
+                          }
+                        : widget.onNext
+                  : () => setState(_newLevel),
+              onReplay: () => setState(_newLevel),
+              onSecondary: widget.onExit,
+            ),
         ],
       ),
     ),
@@ -2471,22 +3551,296 @@ class ResultOverlay extends StatelessWidget {
     required this.won,
     required this.candiesCleared,
     required this.stars,
+    required this.score,
+    required this.coinsEarned,
+    required this.goal,
     this.chapterName,
     this.chapterReward,
     required this.onPrimary,
+    required this.onReplay,
     required this.onSecondary,
   });
 
   final bool won;
   final int candiesCleared;
   final int stars;
+  final int score;
+  final int coinsEarned;
+  final String goal;
   final String? chapterName;
   final String? chapterReward;
   final VoidCallback onPrimary;
+  final VoidCallback onReplay;
   final VoidCallback onSecondary;
 
   @override
   Widget build(BuildContext context) => Positioned.fill(
+    child: ColoredBox(
+      color: const Color(0xba27305e),
+      child: TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0, end: 1),
+        duration: const Duration(milliseconds: 560),
+        curve: Curves.easeOutBack,
+        builder: (_, progress, child) => Opacity(
+          opacity: progress.clamp(0, 1),
+          child: Transform.scale(
+            scale: .76 + progress * .24,
+            alignment: Alignment.center,
+            child: child,
+          ),
+        ),
+        child: LayoutBuilder(
+          builder: (_, constraints) => SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(18, 8, 18, 12),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minHeight: math.max(0, constraints.maxHeight - 20),
+              ),
+              child: Center(
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  alignment: Alignment.topCenter,
+                  children: [
+                    Container(
+                      constraints: const BoxConstraints(maxWidth: 340),
+                      margin: EdgeInsets.zero,
+                      padding: const EdgeInsets.fromLTRB(18, 94, 18, 14),
+                      decoration: BoxDecoration(
+                        color: const Color(0xfffffcf5),
+                        borderRadius: BorderRadius.circular(32),
+                        border: Border.all(
+                          color: const Color(0xffffd06b),
+                          width: 3,
+                        ),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x66002667),
+                            offset: Offset(0, 8),
+                            blurRadius: 0,
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            won ? 'Amazing!' : 'GAME OVER!',
+                            style: TextStyle(
+                              color: won
+                                  ? const Color(0xff7245a2)
+                                  : const Color(0xff8154c7),
+                              fontSize: 19,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            chapterName != null
+                                ? '$chapterName - CHAPTER COMPLETE'
+                                : won
+                                ? 'You cleared the level successfully!'
+                                : 'The candy reached the danger zone.',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: Color(0xff695064),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          if (won) ...[
+                            _ResultInfoCard(
+                              label: 'SCORE',
+                              value: '$score',
+                              icon: Icons.auto_awesome_rounded,
+                              color: const Color(0xffffbd42),
+                            ),
+                            const SizedBox(height: 6),
+                            _ResultInfoCard(
+                              label: 'LEVEL REWARD',
+                              value: '+$coinsEarned COINS',
+                              icon: Icons.monetization_on_rounded,
+                              color: const Color(0xffffae24),
+                              compact: true,
+                            ),
+                            const SizedBox(height: 6),
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 8,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xfffff1d0),
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(
+                                  color: const Color(0xffffd27d),
+                                  width: 1.5,
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Icon(
+                                    Icons.check_circle_rounded,
+                                    color: Color(0xff5eaf25),
+                                    size: 28,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      'GOAL\n$goal',
+                                      style: const TextStyle(
+                                        color: Color(0xff755240),
+                                        fontSize: 12,
+                                        height: 1.2,
+                                        fontWeight: FontWeight.w900,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ] else
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              child: Column(
+                                children: [
+                                  const Icon(
+                                    Icons.sentiment_satisfied_alt_rounded,
+                                    color: Color(0xffff779f),
+                                    size: 52,
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    '$candiesCleared candies cleared',
+                                    style: const TextStyle(
+                                      color: Color(0xff5d465d),
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          if (chapterReward != null) ...[
+                            const SizedBox(height: 9),
+                            Text(
+                              chapterReward!,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Color(0xff684e67),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 10),
+                          PrimaryButton(
+                            label: won
+                                ? chapterName != null
+                                      ? 'CLAIM REWARD'
+                                      : 'NEXT LEVEL'
+                                : 'TRY AGAIN',
+                            onTap: onPrimary,
+                          ),
+                          if (won) ...[
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: _ResultActionButton(
+                                    icon: Icons.replay_rounded,
+                                    label: 'REPLAY',
+                                    color: const Color(0xff397dde),
+                                    onTap: onReplay,
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: _ResultActionButton(
+                                    icon: Icons.home_rounded,
+                                    label: 'HOME',
+                                    color: const Color(0xffa559ce),
+                                    onTap: onSecondary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ] else
+                            TextButton(
+                              onPressed: onSecondary,
+                              child: const Text(
+                                'BACK TO MAP',
+                                style: TextStyle(fontWeight: FontWeight.w900),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    Positioned(
+                      // Keep the whole three-star row clear above the ribbon.
+                      // This prevents the bottom points of the stars from being
+                      // visually covered on shorter Android displays.
+                      top: -7,
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          _ResultStar(active: stars >= 1, size: 48),
+                          Transform.translate(
+                            offset: const Offset(0, -5),
+                            child: _ResultStar(active: stars >= 2, size: 62),
+                          ),
+                          _ResultStar(active: stars >= 3, size: 48),
+                        ],
+                      ),
+                    ),
+                    Positioned(
+                      top: 43,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 7,
+                        ),
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [Color(0xffff799c), Color(0xffe9487d)],
+                          ),
+                          borderRadius: BorderRadius.circular(15),
+                          border: Border.all(
+                            color: const Color(0xffffc6d9),
+                            width: 2,
+                          ),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Color(0x663e235f),
+                              offset: Offset(0, 4),
+                              blurRadius: 0,
+                            ),
+                          ],
+                        ),
+                        child: Text(
+                          chapterName != null
+                              ? 'CHAPTER COMPLETE!'
+                              : 'LEVEL COMPLETE!',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            letterSpacing: .2,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  Widget legacyBuild(BuildContext context) => Positioned.fill(
     child: ColoredBox(
       color: const Color(0xaa27305e),
       child: Center(
@@ -2584,11 +3938,222 @@ class ResultOverlay extends StatelessWidget {
   );
 }
 
+class _ResultStar extends StatelessWidget {
+  const _ResultStar({required this.active, required this.size});
+
+  final bool active;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => Icon(
+    Icons.star_rounded,
+    color: active ? const Color(0xffffc32f) : const Color(0xffffe7ab),
+    size: size,
+    shadows: active
+        ? const [Shadow(color: Color(0x88ca7112), offset: Offset(0, 4))]
+        : null,
+  );
+}
+
+class _ResultInfoCard extends StatelessWidget {
+  const _ResultInfoCard({
+    required this.label,
+    required this.value,
+    required this.icon,
+    required this.color,
+    this.compact = false,
+  });
+
+  final String label;
+  final String value;
+  final IconData icon;
+  final Color color;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    padding: EdgeInsets.symmetric(vertical: compact ? 7 : 8),
+    decoration: BoxDecoration(
+      color: const Color(0xffffe7ae),
+      borderRadius: BorderRadius.circular(17),
+      border: Border.all(color: const Color(0xffe6b561), width: 1.5),
+    ),
+    child: Column(
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: Color(0xff80552f),
+            fontSize: 11,
+            letterSpacing: .5,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        const SizedBox(height: 1),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: color, size: compact ? 20 : 17),
+            const SizedBox(width: 4),
+            Text(
+              value,
+              style: TextStyle(
+                color: const Color(0xff5a3279),
+                fontSize: compact ? 18 : 25,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+}
+
+class _ResultActionButton extends StatelessWidget {
+  const _ResultActionButton({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Pressable(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(18),
+    child: Container(
+      height: 44,
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white, width: 2),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x5539236e),
+            offset: Offset(0, 3),
+            blurRadius: 0,
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, color: Colors.white, size: 21),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key, required this.model, required this.onBack});
 
   final AppModel model;
   final VoidCallback onBack;
+
+  Widget collectionRewardHub(BuildContext context) {
+    final stars = model.stars.fold<int>(0, (sum, value) => sum + value);
+    final collectionScore = stars + model.unlocked * 3;
+    return GradientScaffold(
+      child: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 8, 18, 0),
+              child: Row(
+                children: [
+                  RoundIcon(Icons.arrow_back_rounded, onBack),
+                  const Spacer(),
+                  CoinPill(coins: model.coins),
+                ],
+              ),
+            ),
+            const CollectionTitleRibbon(),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(22, 7, 22, 10),
+              child: Text(
+                'Keep playing to collect sweet launcher skins!',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Color(0xff654486),
+                  fontSize: 15,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(18, 0, 18, 26),
+                children: [
+                  CollectionSpinHero(
+                    canSpin: model.canLuckySpin,
+                    onTap: () => showDialog<void>(
+                      context: context,
+                      builder: (_) => LuckySpinDialog(model: model),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  CollectionBoosterSummary(
+                    bombCount: model.bombBoosters,
+                    rainbowCount: model.rainbowBoosters,
+                    lightningCount: model.lightningBoosters,
+                  ),
+                  const SizedBox(height: 15),
+                  CollectionRewardCard(
+                    name: 'Classic Pop',
+                    color: CandyColor.strawberry,
+                    progress: collectionScore.clamp(0, 30),
+                    goal: 30,
+                    unlocked: true,
+                  ),
+                  const SizedBox(height: 12),
+                  CollectionRewardCard(
+                    name: 'Lollipop',
+                    color: CandyColor.lemon,
+                    progress: collectionScore.clamp(0, 60),
+                    goal: 60,
+                    unlocked: model.unlocked >= 4,
+                  ),
+                  const SizedBox(height: 12),
+                  CollectionRewardCard(
+                    name: 'Mint Swirl',
+                    color: CandyColor.mint,
+                    progress: collectionScore.clamp(0, 90),
+                    goal: 90,
+                    unlocked: model.unlocked >= 7,
+                  ),
+                  const SizedBox(height: 12),
+                  CollectionRewardCard(
+                    name: 'Rainbow Glow',
+                    color: CandyColor.blueberry,
+                    progress: collectionScore.clamp(0, 120),
+                    goal: 120,
+                    unlocked: model.unlocked >= 10,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) => GradientScaffold(
@@ -2920,7 +4485,10 @@ class CollectionScreen extends StatelessWidget {
   final VoidCallback onBack;
 
   @override
-  Widget build(BuildContext context) => GradientScaffold(
+  Widget build(BuildContext context) =>
+      SettingsScreen(model: model, onBack: onBack).collectionRewardHub(context);
+
+  Widget legacyBuild(BuildContext context) => GradientScaffold(
     child: SafeArea(
       child: Column(
         children: [
@@ -3323,6 +4891,20 @@ class BoosterShopScreen extends StatelessWidget {
       description: 'Clear a whole candy row.',
     ),
     ShopOffer(
+      type: BoosterType.colorBlast,
+      price: 225,
+      icon: Icons.color_lens_rounded,
+      color: Color(0xffa66bdd),
+      description: 'Choose a colour and pop every matching candy.',
+    ),
+    ShopOffer(
+      type: BoosterType.rocket,
+      price: 250,
+      icon: Icons.rocket_launch_rounded,
+      color: Color(0xffff795b),
+      description: 'Aim a rocket to clear its whole row.',
+    ),
+    ShopOffer(
       type: BoosterType.goldenAim,
       price: 100,
       icon: Icons.gps_fixed_rounded,
@@ -3399,15 +4981,17 @@ class BoosterShopScreen extends StatelessWidget {
                       offer.price,
                     );
                     if (!context.mounted) return;
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          bought
-                              ? '${offer.type.label} added to your boosters!'
-                              : 'You need ${offer.price} coins for ${offer.type.label}.',
+                    if (bought) {
+                      await showPurchaseSuccess(context, offer);
+                    } else {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            'You need ${offer.price} coins for ${offer.type.label}.',
+                          ),
                         ),
-                      ),
-                    );
+                      );
+                    }
                   },
                 );
               },
@@ -3415,6 +4999,97 @@ class BoosterShopScreen extends StatelessWidget {
           ),
         ],
       ),
+    ),
+  );
+}
+
+Future<void> showPurchaseSuccess(BuildContext context, ShopOffer offer) {
+  final navigator = Navigator.of(context, rootNavigator: true);
+  Future<void>.delayed(const Duration(milliseconds: 1050), () {
+    if (navigator.canPop()) navigator.pop();
+  });
+  return showGeneralDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    barrierLabel: 'Purchase complete',
+    barrierColor: Colors.black.withValues(alpha: .18),
+    transitionDuration: const Duration(milliseconds: 240),
+    pageBuilder: (_, __, ___) => Center(
+      child: Material(
+        color: Colors.transparent,
+        child: _PurchaseSuccessCard(offer: offer),
+      ),
+    ),
+    transitionBuilder: (_, animation, __, child) => FadeTransition(
+      opacity: animation,
+      child: ScaleTransition(
+        scale: CurvedAnimation(parent: animation, curve: Curves.elasticOut),
+        child: child,
+      ),
+    ),
+  );
+}
+
+class _PurchaseSuccessCard extends StatelessWidget {
+  const _PurchaseSuccessCard({required this.offer});
+
+  final ShopOffer offer;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: 224,
+    padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+    decoration: BoxDecoration(
+      color: const Color(0xfffffcf7),
+      borderRadius: BorderRadius.circular(25),
+      border: Border.all(color: const Color(0xffffcf59), width: 3),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x66002667),
+          offset: Offset(0, 7),
+          blurRadius: 0,
+        ),
+      ],
+    ),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 66,
+          height: 66,
+          decoration: BoxDecoration(
+            color: offer.color.withValues(alpha: .18),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(offer.icon, color: offer.color, size: 42),
+        ),
+        const SizedBox(height: 10),
+        const Text(
+          'SWEET!',
+          style: TextStyle(
+            color: Color(0xfff6538a),
+            fontSize: 22,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          '${offer.type.label} added!',
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            color: Color(0xff654486),
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        const SizedBox(height: 5),
+        Text(
+          '-${offer.price} coins',
+          style: const TextStyle(
+            color: Color(0xffd64d72),
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+      ],
     ),
   );
 }
@@ -3526,11 +5201,18 @@ class _LuckySpinDialogState extends State<LuckySpinDialog>
     vsync: this,
     duration: const Duration(milliseconds: 1800),
   );
-  String? reward;
+  LuckySpinReward? reward;
+  double _targetAngle = math.pi * 12;
+
   Future<void> _spin() async {
     if (!widget.model.canLuckySpin || controller.isAnimating) return;
-    controller.forward(from: 0);
     final won = await widget.model.luckySpin();
+    if (won == null || !mounted) return;
+    // End with the selected prize beneath the fixed pointer.
+    setState(() {
+      _targetAngle = math.pi * 12 - won.index * math.pi * 2 / 6;
+    });
+    controller.forward(from: 0);
     await Future<void>.delayed(const Duration(milliseconds: 1800));
     if (mounted) setState(() => reward = won);
   }
@@ -3538,6 +5220,7 @@ class _LuckySpinDialogState extends State<LuckySpinDialog>
   @override
   Widget build(BuildContext context) => LuckySpinLayout(
     turns: controller,
+    targetAngle: _targetAngle,
     canSpin: widget.model.canLuckySpin,
     reward: reward,
     onSpin: _spin,
@@ -3584,7 +5267,7 @@ class _LuckySpinDialogState extends State<LuckySpinDialog>
               ? (widget.model.canLuckySpin
                     ? 'One free spin today!'
                     : 'Come back tomorrow!')
-              : 'YOU GOT: $reward!',
+              : 'YOU GOT: ${reward!.label}!',
           textAlign: TextAlign.center,
           style: const TextStyle(fontWeight: FontWeight.w900),
         ),
@@ -3612,6 +5295,7 @@ class LuckySpinLayout extends StatelessWidget {
   const LuckySpinLayout({
     super.key,
     required this.turns,
+    required this.targetAngle,
     required this.canSpin,
     required this.reward,
     required this.onSpin,
@@ -3619,8 +5303,9 @@ class LuckySpinLayout extends StatelessWidget {
   });
 
   final Animation<double> turns;
+  final double targetAngle;
   final bool canSpin;
-  final String? reward;
+  final LuckySpinReward? reward;
   final VoidCallback onSpin;
   final VoidCallback onClose;
 
@@ -3686,6 +5371,7 @@ class LuckySpinLayout extends StatelessWidget {
                       builder: (_, constraints) => LuckySpinWheel(
                         size: math.min(constraints.maxWidth, 365),
                         turns: turns,
+                        targetAngle: targetAngle,
                       ),
                     ),
                     const SizedBox(height: 10),
@@ -3693,7 +5379,7 @@ class LuckySpinLayout extends StatelessWidget {
                       duration: const Duration(milliseconds: 220),
                       child: Text(
                         reward != null
-                            ? 'YOU WON: $reward!'
+                            ? 'YOU WON: ${reward!.label}!'
                             : canSpin
                             ? '1 FREE SPIN DAILY'
                             : 'YOUR FREE SPIN IS READY TOMORROW',
@@ -3848,10 +5534,16 @@ class LuckySpinRibbon extends StatelessWidget {
 }
 
 class LuckySpinWheel extends StatelessWidget {
-  const LuckySpinWheel({super.key, required this.size, required this.turns});
+  const LuckySpinWheel({
+    super.key,
+    required this.size,
+    required this.turns,
+    this.targetAngle = 0,
+  });
 
   final double size;
   final Animation<double> turns;
+  final double targetAngle;
 
   static const _prizes = [
     _LuckyWheelPrize('50\nCOINS', Icons.monetization_on_rounded),
@@ -3889,7 +5581,7 @@ class LuckySpinWheel extends StatelessWidget {
         AnimatedBuilder(
           animation: turns,
           builder: (_, child) => Transform.rotate(
-            angle: Curves.easeOutCubic.transform(turns.value) * math.pi * 12,
+            angle: Curves.easeOutCubic.transform(turns.value) * targetAngle,
             child: child,
           ),
           child: SizedBox.square(
@@ -3905,6 +5597,8 @@ class LuckySpinWheel extends StatelessWidget {
                     prize: _prizes[index],
                     index: index,
                     diameter: size * .9,
+                    turns: turns,
+                    targetAngle: targetAngle,
                   ),
                 Container(
                   width: size * .22,
@@ -3962,11 +5656,15 @@ class _LuckyWheelPrizeLabel extends StatelessWidget {
     required this.prize,
     required this.index,
     required this.diameter,
+    required this.turns,
+    required this.targetAngle,
   });
 
   final _LuckyWheelPrize prize;
   final int index;
   final double diameter;
+  final Animation<double> turns;
+  final double targetAngle;
 
   @override
   Widget build(BuildContext context) {
@@ -3979,24 +5677,37 @@ class _LuckyWheelPrizeLabel extends StatelessWidget {
       child: SizedBox(
         width: labelSize,
         height: labelSize,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(prize.icon, color: Colors.white, size: labelSize * .55),
-            Text(
-              prize.label,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: math.max(8, diameter * .037),
-                height: .98,
-                fontWeight: FontWeight.w900,
-                shadows: const [
-                  Shadow(color: Color(0x88003383), offset: Offset(0, 1)),
-                ],
-              ),
+        child: AnimatedBuilder(
+          animation: turns,
+          builder: (_, child) => Transform.rotate(
+            // The wheel moves the label's position, while this inverse turn
+            // keeps its text and icon facing the player.
+            angle: -Curves.easeOutCubic.transform(turns.value) * targetAngle,
+            child: child,
+          ),
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(prize.icon, color: Colors.white, size: labelSize * .55),
+                Text(
+                  prize.label,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: math.max(8, diameter * .037),
+                    height: .98,
+                    fontWeight: FontWeight.w900,
+                    shadows: const [
+                      Shadow(color: Color(0x88003383), offset: Offset(0, 1)),
+                    ],
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -4387,10 +6098,18 @@ class LollipopDecoration extends StatelessWidget {
 }
 
 class LollipopLauncher extends StatelessWidget {
-  const LollipopLauncher({super.key, required this.color, required this.size});
+  const LollipopLauncher({
+    super.key,
+    required this.color,
+    required this.size,
+    this.isBomb = false,
+    this.isRocket = false,
+  });
 
   final CandyColor color;
   final double size;
+  final bool isBomb;
+  final bool isRocket;
 
   @override
   Widget build(BuildContext context) => SizedBox(
@@ -4426,7 +6145,11 @@ class LollipopLauncher extends StatelessWidget {
               ),
             ],
           ),
-          child: CustomPaint(painter: CandySwirlPainter()),
+          child: isBomb
+              ? BombCandy(size: size * .82)
+              : isRocket
+              ? RocketCandy(size: size * .86)
+              : CustomPaint(painter: CandySwirlPainter()),
         ),
         Positioned(
           bottom: 0,
@@ -4524,31 +6247,90 @@ class CandyBall extends StatelessWidget {
   final double size;
 
   @override
-  Widget build(BuildContext context) => Container(
-    width: size,
-    height: size,
-    alignment: Alignment.center,
-    decoration: BoxDecoration(
-      shape: BoxShape.circle,
-      gradient: LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: [Color.lerp(color.color, Colors.white, .3)!, color.color],
-      ),
-      border: Border.all(color: Colors.white, width: math.max(1, size * .045)),
-      boxShadow: [
-        BoxShadow(
-          color: color.color.withValues(alpha: .35),
-          offset: const Offset(0, 3),
-          blurRadius: 0,
+  Widget build(BuildContext context) {
+    final highlight = Color.lerp(color.color, Colors.white, .72)!;
+    final light = Color.lerp(color.color, Colors.white, .28)!;
+    final shade = Color.lerp(color.color, Colors.black, .34)!;
+    final rim = math.max(1.0, size * .045);
+
+    return RepaintBoundary(
+      child: SizedBox.square(
+        dimension: size,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: RadialGradient(
+                  center: const Alignment(-.4, -.52),
+                  radius: 1.03,
+                  colors: [highlight, light, color.color, shade],
+                  stops: const [.0, .22, .64, 1],
+                ),
+                border: Border.all(
+                  color: Colors.white.withValues(alpha: .9),
+                  width: rim,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: shade.withValues(alpha: .58),
+                    offset: Offset(0, size * .08),
+                    blurRadius: size * .025,
+                  ),
+                ],
+              ),
+            ),
+            Positioned.fill(
+              child: Padding(
+                padding: EdgeInsets.all(size * .115),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: .23),
+                      width: math.max(1, size * .025),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              left: size * .17,
+              top: size * .12,
+              child: Transform.rotate(
+                angle: -.48,
+                child: Container(
+                  width: size * .28,
+                  height: size * .12,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: .68),
+                    borderRadius: BorderRadius.circular(size),
+                  ),
+                ),
+              ),
+            ),
+            CustomPaint(
+              size: Size.square(size * .56),
+              painter: CandyMarkPainter(color),
+            ),
+            Positioned(
+              right: size * .13,
+              bottom: size * .15,
+              child: Container(
+                width: size * .11,
+                height: size * .11,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.white.withValues(alpha: .22),
+                ),
+              ),
+            ),
+          ],
         ),
-      ],
-    ),
-    child: CustomPaint(
-      size: Size.square(size * .52),
-      painter: CandyMarkPainter(color),
-    ),
-  );
+      ),
+    );
+  }
 }
 
 class MysteryCandy extends StatelessWidget {
@@ -4587,6 +6369,249 @@ class MysteryCandy extends StatelessWidget {
         shadows: const [Shadow(color: Color(0x66000000), offset: Offset(0, 2))],
       ),
     ),
+  );
+}
+
+class BombCandy extends StatelessWidget {
+  const BombCandy({super.key, required this.size});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => SizedBox.square(
+    dimension: size,
+    child: Stack(
+      clipBehavior: Clip.none,
+      alignment: Alignment.center,
+      children: [
+        Container(
+          width: size * .82,
+          height: size * .82,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: const RadialGradient(
+              center: Alignment(-.35, -.38),
+              colors: [Color(0xff7b6683), Color(0xff3d3146), Color(0xff1f1727)],
+            ),
+            border: Border.all(
+              color: Colors.white,
+              width: math.max(1, size * .045),
+            ),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x55003583),
+                offset: Offset(0, 3),
+                blurRadius: 0,
+              ),
+            ],
+          ),
+        ),
+        Positioned(
+          top: size * .01,
+          right: size * .08,
+          child: Transform.rotate(
+            angle: .45,
+            child: Container(
+              width: size * .18,
+              height: size * .32,
+              decoration: BoxDecoration(
+                color: const Color(0xfff5b43d),
+                borderRadius: BorderRadius.circular(size),
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          top: -size * .12,
+          right: -size * .04,
+          child: Icon(
+            Icons.auto_awesome_rounded,
+            color: const Color(0xffffd353),
+            size: size * .3,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class RocketCandy extends StatelessWidget {
+  const RocketCandy({super.key, required this.size});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => SizedBox.square(
+    dimension: size,
+    child: Transform.rotate(
+      angle: -.78,
+      child: Stack(
+        alignment: Alignment.center,
+        clipBehavior: Clip.none,
+        children: [
+          Container(
+            width: size * .44,
+            height: size * .82,
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Color(0xffffe776),
+                  Color(0xffff875e),
+                  Color(0xffe95178),
+                ],
+              ),
+              borderRadius: BorderRadius.circular(size),
+              border: Border.all(
+                color: Colors.white,
+                width: math.max(1, size * .04),
+              ),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x44003583),
+                  offset: Offset(0, 2),
+                  blurRadius: 0,
+                ),
+              ],
+            ),
+          ),
+          Positioned(
+            top: size * .04,
+            child: Icon(
+              Icons.change_history_rounded,
+              color: const Color(0xffffd353),
+              size: size * .36,
+            ),
+          ),
+          Positioned(
+            bottom: -size * .12,
+            child: Icon(
+              Icons.auto_awesome_rounded,
+              color: const Color(0xffffd353),
+              size: size * .34,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class RocketRowBlastEffect extends StatelessWidget {
+  const RocketRowBlastEffect({
+    super.key,
+    required this.height,
+    required this.animation,
+  });
+
+  final double height;
+  final Animation<double> animation;
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: animation,
+    builder: (_, __) {
+      final progress = Curves.easeOut.transform(animation.value);
+      final opacity = (1 - progress).clamp(0.0, 1.0);
+      return Opacity(
+        opacity: opacity,
+        child: SizedBox(
+          height: height,
+          child: Center(
+            child: Container(
+              height: height * (.14 + progress * .18),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(height),
+                gradient: const LinearGradient(
+                  colors: [
+                    Color(0x00ffde66),
+                    Color(0xffffe66d),
+                    Color(0xffffffff),
+                    Color(0xffff8a55),
+                    Color(0x00ff6f63),
+                  ],
+                ),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0xaaffad3d),
+                    blurRadius: 12,
+                    spreadRadius: 2,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    },
+  );
+}
+
+class BombBlastEffect extends StatelessWidget {
+  const BombBlastEffect({
+    super.key,
+    required this.size,
+    required this.animation,
+  });
+
+  final double size;
+  final Animation<double> animation;
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: animation,
+    builder: (_, __) {
+      final progress = Curves.easeOut.transform(animation.value);
+      final opacity = (1 - progress).clamp(0.0, 1.0);
+      final diameter = size * (.22 + progress * .82);
+      return SizedBox.square(
+        dimension: size,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Opacity(
+              opacity: opacity,
+              child: Container(
+                width: diameter,
+                height: diameter,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: const Color(0xffffd353),
+                    width: math.max(2, size * .055),
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xffff8b50).withValues(alpha: .6),
+                      blurRadius: size * .26,
+                      spreadRadius: size * .05,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            ...List<Widget>.generate(8, (index) {
+              final angle = index * math.pi / 4;
+              final distance = size * (.06 + progress * .38);
+              return Opacity(
+                opacity: opacity,
+                child: Transform.translate(
+                  offset: Offset(math.cos(angle), math.sin(angle)) * distance,
+                  child: Icon(
+                    Icons.auto_awesome_rounded,
+                    color: index.isEven
+                        ? const Color(0xffffd353)
+                        : const Color(0xffff7a55),
+                    size: size * .14,
+                  ),
+                ),
+              );
+            }),
+          ],
+        ),
+      );
+    },
   );
 }
 
@@ -4747,25 +6772,48 @@ class CandyMarkPainter extends CustomPainter {
           Paint()..color = color.color,
         );
       case CandyColor.blueberry:
-        final diamond = Path()
-          ..moveTo(center.dx, size.height * .05)
-          ..lineTo(size.width * .95, center.dy)
-          ..lineTo(center.dx, size.height * .95)
-          ..lineTo(size.width * .05, center.dy)
-          ..close();
-        canvas.drawPath(diamond, paint);
+        final swirl = Paint()
+          ..color = Colors.white.withValues(alpha: .92)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = size.width * .14
+          ..strokeCap = StrokeCap.round;
+        final outer = Rect.fromLTWH(
+          size.width * .08,
+          size.height * .08,
+          size.width * .84,
+          size.height * .84,
+        );
+        canvas.drawArc(outer, -.35, math.pi * 1.62, false, swirl);
+        canvas.drawArc(
+          Rect.fromCenter(
+            center: center + Offset(size.width * .04, size.height * .02),
+            width: size.width * .43,
+            height: size.height * .43,
+          ),
+          math.pi * .15,
+          math.pi * 1.65,
+          false,
+          swirl,
+        );
       case CandyColor.grape:
         for (final offset in const [
-          Offset(-.18, -.12),
-          Offset(.18, -.12),
-          Offset(0, .16),
+          Offset(0, -.24),
+          Offset(.23, -.06),
+          Offset(.14, .2),
+          Offset(-.14, .2),
+          Offset(-.23, -.06),
         ]) {
           canvas.drawCircle(
             center + Offset(offset.dx * size.width, offset.dy * size.height),
-            size.width * .19,
+            size.width * .155,
             paint,
           );
         }
+        canvas.drawCircle(
+          center,
+          size.width * .11,
+          Paint()..color = color.color.withValues(alpha: .75),
+        );
     }
   }
 
@@ -4924,38 +6972,91 @@ class RoundIcon extends StatelessWidget {
   );
 }
 
-class CoinPill extends StatelessWidget {
+class CoinPill extends StatefulWidget {
   const CoinPill({super.key, required this.coins});
 
   final int coins;
 
   @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(18),
-      border: Border.all(color: const Color(0xffffd25b), width: 2),
-    ),
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const Icon(
-          Icons.monetization_on_rounded,
-          color: Color(0xffffb725),
-          size: 19,
-        ),
-        const SizedBox(width: 4),
-        Text(
-          '$coins',
-          style: const TextStyle(
-            color: Color(0xff9d6a19),
-            fontWeight: FontWeight.w900,
+  State<CoinPill> createState() => _CoinPillState();
+}
+
+class _CoinPillState extends State<CoinPill> {
+  late int _previousCoins = widget.coins;
+
+  @override
+  void didUpdateWidget(covariant CoinPill oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.coins != widget.coins) _previousCoins = oldWidget.coins;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final changed = _previousCoins != widget.coins;
+    return TweenAnimationBuilder<double>(
+      key: ValueKey('$_previousCoins:${widget.coins}'),
+      tween: Tween(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 520),
+      curve: Curves.easeOutCubic,
+      builder: (_, progress, __) {
+        final visibleCoins =
+            (_previousCoins + (widget.coins - _previousCoins) * progress)
+                .round();
+        final bounce = changed ? math.sin(progress * math.pi) * .13 : 0.0;
+        final gaining = widget.coins > _previousCoins;
+        return Transform.scale(
+          scale: 1 + bounce,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: changed
+                    ? (gaining
+                          ? const Color(0xff69c94e)
+                          : const Color(0xfff47b98))
+                    : const Color(0xffffd25b),
+                width: 2,
+              ),
+              boxShadow: changed
+                  ? [
+                      BoxShadow(
+                        color:
+                            (gaining
+                                    ? const Color(0xff69c94e)
+                                    : const Color(0xfff47b98))
+                                .withValues(alpha: .36 * (1 - progress)),
+                        blurRadius: 10,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.monetization_on_rounded,
+                  color: gaining && changed
+                      ? const Color(0xff5fb63f)
+                      : const Color(0xffffb725),
+                  size: 19,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  '$visibleCoins',
+                  style: const TextStyle(
+                    color: Color(0xff9d6a19),
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
-      ],
-    ),
-  );
+        );
+      },
+    );
+  }
 }
 
 class MiniNav extends StatelessWidget {
@@ -5163,6 +7264,249 @@ class InfoPill extends StatelessWidget {
   );
 }
 
+class GameTopHud extends StatelessWidget {
+  const GameTopHud({
+    super.key,
+    required this.level,
+    required this.score,
+    required this.stars,
+    required this.coins,
+    required this.onExit,
+    required this.onPause,
+  });
+
+  final int level;
+  final int score;
+  final int stars;
+  final int coins;
+  final VoidCallback onExit;
+  final VoidCallback onPause;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    height: 70,
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+    decoration: BoxDecoration(
+      gradient: const LinearGradient(
+        colors: [Color(0xff5e2e9b), Color(0xff8d54c6)],
+      ),
+      borderRadius: BorderRadius.circular(23),
+      border: Border.all(color: const Color(0xffbd8bea), width: 2),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x55002e75),
+          offset: Offset(0, 4),
+          blurRadius: 0,
+        ),
+      ],
+    ),
+    child: Row(
+      children: [
+        _GameHudRoundButton(icon: Icons.arrow_back_rounded, onTap: onExit),
+        const SizedBox(width: 5),
+        _GameHudTile(label: 'LEVEL', value: '$level', width: 50),
+        const SizedBox(width: 5),
+        Expanded(
+          child: Container(
+            height: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+            decoration: BoxDecoration(
+              color: const Color(0xff482576).withValues(alpha: .78),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Text(
+                  'SCORE',
+                  style: TextStyle(
+                    color: Color(0xffffe36b),
+                    fontSize: 9,
+                    letterSpacing: .5,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                Text(
+                  '$score',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    height: 1.05,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: List<Widget>.generate(
+                    3,
+                    (index) => Icon(
+                      Icons.star_rounded,
+                      color: index < stars
+                          ? const Color(0xffffcf3e)
+                          : const Color(0xff79549f),
+                      size: 14,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(width: 5),
+        _GameCoinCounter(coins: coins),
+        const SizedBox(width: 5),
+        _GameHudRoundButton(icon: Icons.pause_rounded, onTap: onPause),
+      ],
+    ),
+  );
+}
+
+class _GameHudRoundButton extends StatelessWidget {
+  const _GameHudRoundButton({required this.icon, required this.onTap});
+
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Pressable(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(20),
+    child: Container(
+      width: 42,
+      height: 42,
+      decoration: BoxDecoration(
+        color: const Color(0xffff4f85),
+        shape: BoxShape.circle,
+        border: Border.all(color: const Color(0xffffc0d5), width: 2),
+      ),
+      child: Icon(icon, color: Colors.white, size: 25),
+    ),
+  );
+}
+
+class _GameHudTile extends StatelessWidget {
+  const _GameHudTile({
+    required this.label,
+    required this.value,
+    required this.width,
+  });
+
+  final String label;
+  final String value;
+  final double width;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: width,
+    height: double.infinity,
+    decoration: BoxDecoration(
+      color: const Color(0xff482576).withValues(alpha: .78),
+      borderRadius: BorderRadius.circular(14),
+    ),
+    child: Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: Color(0xffffd8ec),
+            fontSize: 8,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 20,
+            height: 1.05,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _GameCoinCounter extends StatefulWidget {
+  const _GameCoinCounter({required this.coins});
+
+  final int coins;
+
+  @override
+  State<_GameCoinCounter> createState() => _GameCoinCounterState();
+}
+
+class _GameCoinCounterState extends State<_GameCoinCounter> {
+  late int _previousCoins = widget.coins;
+
+  @override
+  void didUpdateWidget(covariant _GameCoinCounter oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.coins != widget.coins) _previousCoins = oldWidget.coins;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final changed = _previousCoins != widget.coins;
+    return TweenAnimationBuilder<double>(
+      key: ValueKey('$_previousCoins:${widget.coins}'),
+      tween: Tween(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 520),
+      curve: Curves.easeOutCubic,
+      builder: (_, progress, __) {
+        final visibleCoins =
+            (_previousCoins + (widget.coins - _previousCoins) * progress)
+                .round();
+        return Transform.scale(
+          scale: 1 + (changed ? math.sin(progress * math.pi) * .11 : 0),
+          child: Container(
+            width: 76,
+            height: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(15),
+              border: Border.all(
+                color: changed
+                    ? (widget.coins > _previousCoins
+                          ? const Color(0xff69c94e)
+                          : const Color(0xfff47b98))
+                    : const Color(0xffffd14c),
+                width: 2,
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(
+                  Icons.monetization_on_rounded,
+                  color: Color(0xffffb523),
+                  size: 20,
+                ),
+                const SizedBox(width: 3),
+                Flexible(
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      '$visibleCoins',
+                      style: const TextStyle(
+                        color: Color(0xff8d571a),
+                        fontSize: 15,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class GameStatusCard extends StatelessWidget {
   const GameStatusCard({
     super.key,
@@ -5227,6 +7571,76 @@ class GameStatusCard extends StatelessWidget {
       ],
     ),
   );
+}
+
+/// Compact miss indicator for the descending-ceiling mechanic. It deliberately
+/// stays small so it does not compete with the objective and shots HUD cards.
+class MissCounterIndicator extends StatelessWidget {
+  const MissCounterIndicator({
+    super.key,
+    required this.misses,
+    required this.threshold,
+    required this.dropping,
+  });
+
+  final int misses;
+  final int threshold;
+  final bool dropping;
+
+  @override
+  Widget build(BuildContext context) {
+    final safeThreshold = math.max(1, threshold);
+    return Container(
+      width: 86,
+      height: 76,
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 9),
+      decoration: BoxDecoration(
+        color: const Color(0xfffff8fc).withValues(alpha: .94),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xffffd7ed), width: 2),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x22003583),
+            offset: Offset(0, 3),
+            blurRadius: 0,
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            dropping ? 'DROP!' : 'MISSES',
+            style: const TextStyle(
+              color: Color(0xff654486),
+              fontSize: 10,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 7),
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 3,
+            runSpacing: 3,
+            children: List<Widget>.generate(safeThreshold, (index) {
+              final filled = !dropping && index < misses;
+              return Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: filled
+                      ? const Color(0xfff6538a)
+                      : const Color(0xffffdce9),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: const Color(0xffff9fbe), width: .8),
+                ),
+              );
+            }),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class CandySlotCard extends StatelessWidget {
@@ -5314,7 +7728,7 @@ class BoosterSlotCard extends StatelessWidget {
           const SizedBox(height: 3),
           Text(type?.emoji ?? '🎁', style: const TextStyle(fontSize: 22)),
           Text(
-            '×$count',
+            selected ? 'READY ×$count' : '×$count',
             style: const TextStyle(
               color: Color(0xfff6538a),
               fontSize: 12,
@@ -5369,6 +7783,408 @@ class SettingTile extends StatelessWidget {
     value: value,
     onChanged: onChanged,
   );
+}
+
+class CollectionTitleRibbon extends StatelessWidget {
+  const CollectionTitleRibbon({super.key});
+
+  @override
+  Widget build(BuildContext context) => Stack(
+    alignment: Alignment.center,
+    clipBehavior: Clip.none,
+    children: [
+      Positioned(
+        left: 24,
+        child: Transform.rotate(
+          angle: -.12,
+          child: Container(
+            width: 44,
+            height: 38,
+            color: const Color(0xffd8357c),
+          ),
+        ),
+      ),
+      Positioned(
+        right: 24,
+        child: Transform.rotate(
+          angle: .12,
+          child: Container(
+            width: 44,
+            height: 38,
+            color: const Color(0xffd8357c),
+          ),
+        ),
+      ),
+      Container(
+        margin: const EdgeInsets.symmetric(horizontal: 42),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xfff6538a),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: const Color(0xffffb6d1), width: 2),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x44003583),
+              offset: Offset(0, 5),
+              blurRadius: 0,
+            ),
+          ],
+        ),
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.star_rounded, color: Color(0xffffd353), size: 25),
+            SizedBox(width: 8),
+            Text(
+              'COLLECTION',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 27,
+                fontWeight: FontWeight.w900,
+                letterSpacing: .4,
+                shadows: [
+                  Shadow(color: Color(0x66003583), offset: Offset(0, 3)),
+                ],
+              ),
+            ),
+            SizedBox(width: 8),
+            Icon(Icons.star_rounded, color: Color(0xffffd353), size: 25),
+          ],
+        ),
+      ),
+    ],
+  );
+}
+
+class CollectionSpinHero extends StatelessWidget {
+  const CollectionSpinHero({
+    super.key,
+    required this.canSpin,
+    required this.onTap,
+  });
+
+  final bool canSpin;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Pressable(
+    onTap: onTap,
+    pressedScale: .98,
+    borderRadius: BorderRadius.circular(26),
+    child: Container(
+      height: 258,
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0x33ffffff), Color(0x22ffb1d0)],
+        ),
+        borderRadius: BorderRadius.circular(26),
+      ),
+      child: Stack(
+        alignment: Alignment.center,
+        clipBehavior: Clip.none,
+        children: [
+          Positioned(left: 4, bottom: 32, child: LollipopDecoration(size: 56)),
+          Positioned(right: 4, bottom: 32, child: LollipopDecoration(size: 60)),
+          Positioned(
+            top: 0,
+            child: LuckySpinWheel(
+              size: 200,
+              turns: const AlwaysStoppedAnimation<double>(0),
+            ),
+          ),
+          Positioned(
+            left: 28,
+            right: 28,
+            bottom: 7,
+            child: Container(
+              height: 57,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: const Color(0xfff6538a),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: const Color(0xffffb5cf), width: 2),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x44003583),
+                    offset: Offset(0, 5),
+                    blurRadius: 0,
+                  ),
+                ],
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.casino_rounded, color: Colors.white),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'LUCKY SPIN',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  if (canSpin) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 7,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xff65bd30),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Text(
+                        'FREE',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class CollectionBoosterSummary extends StatelessWidget {
+  const CollectionBoosterSummary({
+    super.key,
+    required this.bombCount,
+    required this.rainbowCount,
+    required this.lightningCount,
+  });
+
+  final int bombCount;
+  final int rainbowCount;
+  final int lightningCount;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+    decoration: BoxDecoration(
+      color: Colors.white.withValues(alpha: .92),
+      borderRadius: BorderRadius.circular(22),
+      border: Border.all(color: const Color(0xffffd7ed), width: 2),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x33003583),
+          offset: Offset(0, 4),
+          blurRadius: 0,
+        ),
+      ],
+    ),
+    child: Column(
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 4),
+          decoration: BoxDecoration(
+            color: const Color(0xff9a66d8),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: const Text(
+            'BOOSTERS',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: CollectionBoosterStat(
+                icon: Icons.warning_amber_rounded,
+                color: const Color(0xff3d3146),
+                label: 'Bomb',
+                count: bombCount,
+              ),
+            ),
+            Container(width: 1, height: 38, color: const Color(0xffeadfeb)),
+            Expanded(
+              child: CollectionBoosterStat(
+                icon: Icons.brightness_5_rounded,
+                color: const Color(0xfff6538a),
+                label: 'Rainbow',
+                count: rainbowCount,
+              ),
+            ),
+            Container(width: 1, height: 38, color: const Color(0xffeadfeb)),
+            Expanded(
+              child: CollectionBoosterStat(
+                icon: Icons.bolt_rounded,
+                color: const Color(0xffffbd2f),
+                label: 'Lightning',
+                count: lightningCount,
+              ),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+}
+
+class CollectionBoosterStat extends StatelessWidget {
+  const CollectionBoosterStat({
+    super.key,
+    required this.icon,
+    required this.color,
+    required this.label,
+    required this.count,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String label;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    children: [
+      Icon(icon, color: color, size: 27),
+      Text(
+        '$count',
+        style: const TextStyle(
+          color: Color(0xff654486),
+          fontSize: 17,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+      Text(
+        label,
+        style: const TextStyle(
+          color: Color(0xff8a778d),
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    ],
+  );
+}
+
+class CollectionRewardCard extends StatelessWidget {
+  const CollectionRewardCard({
+    super.key,
+    required this.name,
+    required this.color,
+    required this.progress,
+    required this.goal,
+    required this.unlocked,
+  });
+
+  final String name;
+  final CandyColor color;
+  final int progress;
+  final int goal;
+  final bool unlocked;
+
+  @override
+  Widget build(BuildContext context) {
+    final ratio = (progress / goal).clamp(0.0, 1.0);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .94),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: color.color.withValues(alpha: .42), width: 2),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x33003583),
+            offset: Offset(0, 5),
+            blurRadius: 0,
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 70,
+            height: 70,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: color.color.withValues(alpha: .16),
+              shape: BoxShape.circle,
+              border: Border.all(color: color.color, width: 3),
+            ),
+            child: CandyBall(color: color, size: 55),
+          ),
+          const SizedBox(width: 13),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name.toUpperCase(),
+                  style: TextStyle(
+                    color: color.color,
+                    fontSize: 19,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                const Text(
+                  'Collect stars and clear levels!',
+                  style: TextStyle(
+                    color: Color(0xff715f78),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Text(
+                      unlocked ? 'COLLECTED' : 'KEEP PLAYING',
+                      style: TextStyle(
+                        color: color.color,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      '$progress / $goal',
+                      style: const TextStyle(
+                        color: Color(0xff654486),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 3),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: LinearProgressIndicator(
+                    value: ratio,
+                    minHeight: 9,
+                    backgroundColor: const Color(0xffeee8f0),
+                    valueColor: AlwaysStoppedAnimation(color.color),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Icon(
+            unlocked ? Icons.card_giftcard_rounded : Icons.lock_rounded,
+            color: unlocked ? const Color(0xffffb52c) : const Color(0xff9b919b),
+            size: 36,
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class CollectionCard extends StatelessWidget {
