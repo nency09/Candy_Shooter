@@ -52,7 +52,11 @@ void main() {
     }
 
     await tester.dragFrom(const Offset(180, 650), const Offset(0, -240));
-    await tester.pump(const Duration(milliseconds: 1500));
+    // Flight movement is display-synchronised. Advance realistic display frames
+    // rather than one large fake-time jump, which does not represent a device.
+    for (var frame = 0; frame < 100; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
     expect(find.text('29'), findsOneWidget);
   });
 

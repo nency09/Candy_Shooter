@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
 import 'auth_screen.dart';
@@ -23,10 +24,35 @@ Future<void> main() async {
 }
 
 class LuckySpinReward {
-  const LuckySpinReward({required this.label, required this.index});
+  const LuckySpinReward({
+    required this.label,
+    required this.index,
+    required this.segmentCount,
+  });
 
   final String label;
   final int index;
+  final int segmentCount;
+}
+
+/// A wheel segment. The wheel is rebuilt from the player's current level so
+/// it never awards a power-up before that power-up has been introduced.
+class LuckySpinPrize {
+  const LuckySpinPrize({
+    required this.label,
+    required this.wheelLabel,
+    required this.icon,
+    this.booster,
+    this.coins = 0,
+    this.isMystery = false,
+  });
+
+  final String label;
+  final String wheelLabel;
+  final IconData icon;
+  final BoosterType? booster;
+  final int coins;
+  final bool isMystery;
 }
 
 class AppModel extends ChangeNotifier {
@@ -299,6 +325,21 @@ class AppModel extends ChangeNotifier {
     BoosterType.extraSwap => extraSwapBoosters,
   };
 
+  /// The player meets these boosters gradually, so Lucky Spin, the shop and
+  /// the in-game tray all follow the same progression rules.
+  int boosterUnlockLevel(BoosterType type) => switch (type) {
+    BoosterType.bomb || BoosterType.extraSwap => 1,
+    BoosterType.rainbow => 6,
+    BoosterType.lightning => 11,
+    BoosterType.goldenAim => 1,
+    BoosterType.colorBlast => 21,
+    BoosterType.rocket => 31,
+    BoosterType.megaBomb => 41,
+  };
+
+  bool isBoosterUnlocked(BoosterType type) =>
+      unlocked >= boosterUnlockLevel(type);
+
   bool isChapterUnlocked(ChapterConfig chapter) =>
       chapter.id == 1 || claimedChapterRewards.contains(chapter.id - 1);
 
@@ -318,25 +359,27 @@ class AppModel extends ChangeNotifier {
     coins += 15 + earnedStars * 10;
     await _save();
     notifyListeners();
-    _submitWeeklyScore(score);
+    _submitLeaderboardResult(
+      score: score,
+      levelReached: level,
+      totalStars: stars.fold<int>(0, (sum, stars) => sum + stars),
+    );
     return isChapterEnd && !claimedChapterRewards.contains(chapter.id)
         ? chapter
         : null;
   }
 
-  Future<void> _submitWeeklyScore(int score) async {
-    final user = auth.currentUser;
-    if (user == null) return;
-    final suppliedName = (user.userMetadata?['display_name'] as String?)
-        ?.trim();
-    final displayName = suppliedName != null && suppliedName.isNotEmpty
-        ? suppliedName
-        : (user.email?.split('@').first ?? 'Candy Player');
+  Future<void> _submitLeaderboardResult({
+    required int score,
+    required int levelReached,
+    required int totalStars,
+  }) async {
+    if (auth.currentUser == null) return;
     try {
-      await leaderboard.submitBestScore(
-        uid: user.id,
-        displayName: displayName,
+      await leaderboard.submitLeaderboardResult(
         score: score,
+        levelReached: levelReached,
+        totalStars: totalStars,
       );
     } catch (_) {
       // A finished level is never blocked by a temporary leaderboard failure.
@@ -373,7 +416,7 @@ class AppModel extends ChangeNotifier {
   }
 
   Future<bool> useBooster(BoosterType type) async {
-    if (boosterCount(type) == 0) return false;
+    if (!isBoosterUnlocked(type) || boosterCount(type) == 0) return false;
     switch (type) {
       case BoosterType.bomb:
         bombBoosters--;
@@ -398,7 +441,7 @@ class AppModel extends ChangeNotifier {
   }
 
   Future<bool> buyBooster(BoosterType type, int cost) async {
-    if (cost <= 0 || coins < cost) return false;
+    if (!isBoosterUnlocked(type) || cost <= 0 || coins < cost) return false;
     coins -= cost;
     switch (type) {
       case BoosterType.bomb:
@@ -461,36 +504,173 @@ class AppModel extends ChangeNotifier {
   bool get canLuckySpin => lastLuckySpin != _today;
   String get _today => DateTime.now().toIso8601String().substring(0, 10);
 
+  static const _coins50 = LuckySpinPrize(
+    label: '50 Coins',
+    wheelLabel: '50\nCOINS',
+    icon: Icons.monetization_on_rounded,
+    coins: 50,
+  );
+  static const _coins100 = LuckySpinPrize(
+    label: '100 Coins',
+    wheelLabel: '100\nCOINS',
+    icon: Icons.monetization_on_rounded,
+    coins: 100,
+  );
+  static const _bombPrize = LuckySpinPrize(
+    label: 'Bomb',
+    wheelLabel: 'BOMB',
+    icon: Icons.warning_amber_rounded,
+    booster: BoosterType.bomb,
+  );
+  static const _rainbowPrize = LuckySpinPrize(
+    label: 'Rainbow',
+    wheelLabel: 'RAINBOW',
+    icon: Icons.brightness_5_rounded,
+    booster: BoosterType.rainbow,
+  );
+  static const _lightningPrize = LuckySpinPrize(
+    label: 'Lightning',
+    wheelLabel: 'LIGHTNING',
+    icon: Icons.bolt_rounded,
+    booster: BoosterType.lightning,
+  );
+  static const _colorBlastPrize = LuckySpinPrize(
+    label: 'Color Blast',
+    wheelLabel: 'COLOR\nBLAST',
+    icon: Icons.color_lens_rounded,
+    booster: BoosterType.colorBlast,
+  );
+  static const _rocketPrize = LuckySpinPrize(
+    label: 'Rocket',
+    wheelLabel: 'ROCKET',
+    icon: Icons.rocket_launch_rounded,
+    booster: BoosterType.rocket,
+  );
+  static const _goldenAimPrize = LuckySpinPrize(
+    label: 'Golden Aim',
+    wheelLabel: 'GOLDEN\nAIM',
+    icon: Icons.gps_fixed_rounded,
+    booster: BoosterType.goldenAim,
+  );
+  static const _mysteryPrize = LuckySpinPrize(
+    label: 'Mystery',
+    wheelLabel: 'MYSTERY',
+    icon: Icons.card_giftcard_rounded,
+    isMystery: true,
+  );
+
+  /// Exactly six usable slices are shown. New rewards replace repeat coin
+  /// slices as the player reaches the levels where they are explained.
+  List<LuckySpinPrize> get luckySpinPrizes {
+    if (unlocked >= 51) {
+      return const [
+        _coins100,
+        _bombPrize,
+        _rainbowPrize,
+        _lightningPrize,
+        _rocketPrize,
+        _mysteryPrize,
+      ];
+    }
+    if (unlocked >= 31) {
+      return const [
+        _coins100,
+        _bombPrize,
+        _rainbowPrize,
+        _lightningPrize,
+        _colorBlastPrize,
+        _rocketPrize,
+      ];
+    }
+    if (unlocked >= 21) {
+      return const [
+        _coins50,
+        _coins100,
+        _bombPrize,
+        _rainbowPrize,
+        _lightningPrize,
+        _colorBlastPrize,
+      ];
+    }
+    if (unlocked >= 11) {
+      return const [
+        _coins50,
+        _coins100,
+        _bombPrize,
+        _goldenAimPrize,
+        _rainbowPrize,
+        _lightningPrize,
+      ];
+    }
+    if (unlocked >= 6) {
+      return const [
+        _coins50,
+        _coins100,
+        _bombPrize,
+        _goldenAimPrize,
+        _rainbowPrize,
+      ];
+    }
+    return const [_coins50, _coins100, _bombPrize, _goldenAimPrize];
+  }
+
+  void _awardLuckyPrize(LuckySpinPrize prize) {
+    coins += prize.coins;
+    switch (prize.booster) {
+      case BoosterType.bomb:
+        bombBoosters++;
+      case BoosterType.rainbow:
+        rainbowBoosters++;
+      case BoosterType.lightning:
+        lightningBoosters++;
+      case BoosterType.colorBlast:
+        colorBlastBoosters++;
+      case BoosterType.rocket:
+        rocketBoosters++;
+      case BoosterType.goldenAim:
+        goldenAimBoosters++;
+      case BoosterType.megaBomb:
+        megaBombBoosters++;
+      case BoosterType.extraSwap:
+        extraSwapBoosters++;
+      case null:
+        break;
+    }
+  }
+
   Future<LuckySpinReward?> luckySpin() async {
     if (!canLuckySpin) return null;
-    const rewards = [
-      '50 Coins',
-      '100 Coins',
-      'Bomb',
-      'Rainbow',
-      'Lightning',
-      'Mystery',
-    ];
-    final index = math.Random().nextInt(rewards.length);
-    final reward = rewards[index];
-    switch (reward) {
-      case '50 Coins':
-        coins += 50;
-      case '100 Coins':
-        coins += 100;
-      case 'Bomb':
-        bombBoosters++;
-      case 'Rainbow':
-        rainbowBoosters++;
-      case 'Lightning':
-        lightningBoosters++;
-      case 'Mystery':
-        coins += 75;
+    final prizes = luckySpinPrizes;
+    final index = math.Random().nextInt(prizes.length);
+    final prize = prizes[index];
+    var label = prize.label;
+    if (prize.isMystery) {
+      // Mystery only arrives after level 50. It now genuinely gives a random
+      // useful reward instead of always silently becoming 75 coins.
+      final mysteryOptions = <LuckySpinPrize>[
+        _coins50,
+        _coins100,
+        _bombPrize,
+        _rainbowPrize,
+        _lightningPrize,
+        _colorBlastPrize,
+        _rocketPrize,
+      ];
+      final mysteryReward =
+          mysteryOptions[math.Random().nextInt(mysteryOptions.length)];
+      _awardLuckyPrize(mysteryReward);
+      label = 'Mystery: ${mysteryReward.label}';
+    } else {
+      _awardLuckyPrize(prize);
     }
     lastLuckySpin = _today;
     await _save();
     notifyListeners();
-    return LuckySpinReward(label: reward, index: index);
+    return LuckySpinReward(
+      label: label,
+      index: index,
+      segmentCount: prizes.length,
+    );
   }
 
   Future<void> updateSettings({bool? sound, bool? music, bool? haptics}) async {
@@ -1588,8 +1768,11 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   // the lower playfield, so it can be genuinely centred for the player.
   bool showFullScreenResultOverlay = true;
   final List<CandyCell> board = [];
-  Timer? flightTimer;
   Timer? rowTimer;
+  late final Ticker _flightTicker = createTicker(_tickFlight);
+  Duration? _lastFlightTick;
+  Offset? _flightVelocity;
+  BoardGeometry? _flightGeometry;
   late final AnimationController launchController = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 260),
@@ -1652,6 +1835,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   final List<CandyCell> movingBoard = [];
   Offset? aimInput;
   Offset? _lastAimSample;
+  Offset? _pendingAimPoint;
+  BoardGeometry? _pendingAimGeometry;
+  bool _aimUpdateScheduled = false;
   Offset? flight;
   CandyColor? flyingColor;
   bool flyingBomb = false;
@@ -1697,7 +1883,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   }
 
   void _newLevel() {
-    flightTimer?.cancel();
+    _stopFlightTicker();
     rowTimer?.cancel();
     rowController.stop();
     rowController.value = 0;
@@ -1719,6 +1905,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     movingBoard.clear();
     aimInput = null;
     _lastAimSample = null;
+    _pendingAimPoint = null;
+    _pendingAimGeometry = null;
+    _aimUpdateScheduled = false;
     flight = null;
     flyingColor = null;
     flyingBomb = bombLaunching = flyingRocket = rocketLaunching = false;
@@ -1898,13 +2087,102 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       return;
     }
     aimInput = point;
-    if (_lastAimSample != null &&
-        (_lastAimSample! - point).distanceSquared < 25) {
+    _pendingAimPoint = point;
+    _pendingAimGeometry = g;
+    if (_aimUpdateScheduled) return;
+    _aimUpdateScheduled = true;
+    // A drag can produce more pointer events than the display can draw. Keep
+    // only the latest point and calculate the dotted guide once per frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _aimUpdateScheduled = false;
+      final sampledPoint = _pendingAimPoint;
+      final sampledGeometry = _pendingAimGeometry;
+      if (!mounted || sampledPoint == null || sampledGeometry == null) return;
+      if (finished || paused || rowWarning || rowAnimating || flight != null) {
+        return;
+      }
+      if (_lastAimSample != null &&
+          (_lastAimSample! - sampledPoint).distanceSquared < 25) {
+        return;
+      }
+      _lastAimSample = sampledPoint;
+      setState(() {
+        aimPath = _trajectory(sampledPoint, sampledGeometry);
+      });
+    });
+  }
+
+  void _stopFlightTicker() {
+    if (_flightTicker.isActive) _flightTicker.stop();
+    _lastFlightTick = null;
+    _flightVelocity = null;
+    _flightGeometry = null;
+  }
+
+  void _tickFlight(Duration elapsed) {
+    if (!mounted) return;
+    if (paused) {
+      _lastFlightTick = elapsed;
       return;
     }
-    _lastAimSample = point;
+    final previous = flight;
+    final baseVelocity = _flightVelocity;
+    final g = _flightGeometry;
+    final previousTick = _lastFlightTick;
+    _lastFlightTick = elapsed;
+    if (previous == null || baseVelocity == null || g == null) {
+      _stopFlightTicker();
+      return;
+    }
+    // The old 16ms simulation step is preserved, but it now follows the
+    // device's actual frame timing. Clamp a resumed frame to avoid a visible
+    // jump after an interruption.
+    final frameScale = previousTick == null
+        ? 1.0
+        : ((elapsed - previousTick).inMicroseconds / 16000.0).clamp(.5, 2.0);
+    var velocity = baseVelocity * frameScale;
     setState(() {
-      aimPath = _trajectory(point, g);
+      shotTrail.insert(0, previous);
+      if (shotTrail.length > 14) shotTrail.removeLast();
+      for (final spark in shotSparks) {
+        spark.position += spark.velocity * frameScale;
+        spark.velocity += Offset(0, .18 * frameScale);
+        spark.life -= .055 * frameScale;
+      }
+      shotSparks.removeWhere((spark) => spark.life <= 0);
+      var point = previous + velocity;
+      if (point.dx < g.wallLeft || point.dx > g.wallRight) {
+        velocity = Offset(-velocity.dx, velocity.dy);
+        point = previous + velocity;
+      }
+      final collision = _firstCollision(previous, point, g);
+      if (collision != null) {
+        _stopFlightTicker();
+        flight = null;
+        shotTrail.clear();
+        final firedColor = flyingColor ?? current;
+        final firedBomb = flyingBomb;
+        final firedRocket = flyingRocket;
+        flyingColor = null;
+        flyingBomb = false;
+        flyingRocket = false;
+        if (firedBomb) {
+          _explodeBomb(collision.position, g);
+        } else if (firedRocket) {
+          _explodeRocket(collision.position, g, collision.cell);
+        } else {
+          _attach(
+            collision.position,
+            g,
+            firedColor,
+            collided: collision.cell,
+            velocity: velocity,
+          );
+        }
+      } else {
+        flight = point;
+        _flightVelocity = velocity / frameScale;
+      }
     });
   }
 
@@ -1923,7 +2201,11 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     if (!usingFreeSwap &&
         !await widget.model.useBooster(BoosterType.extraSwap)) {
       if (mounted) {
-        setState(() => praise = 'Buy an Extra Swap in the Booster Shop!');
+        setState(
+          () => praise = widget.model.isBoosterUnlocked(BoosterType.extraSwap)
+              ? 'Buy an Extra Swap in the Booster Shop!'
+              : 'Extra Swap unlocks at Level ${widget.model.boosterUnlockLevel(BoosterType.extraSwap)}.',
+        );
       }
       return;
     }
@@ -1949,6 +2231,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         bombLaunching ||
         rocketLaunching ||
         flight != null ||
+        !widget.model.isBoosterUnlocked(type) ||
         widget.model.boosterCount(type) == 0) {
       return;
     }
@@ -2279,54 +2562,10 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       flight = g.launcher;
     });
     launchController.forward(from: 0);
-    flightTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
-      if (!mounted || paused) return;
-      setState(() {
-        final previous = flight;
-        if (previous == null) return;
-        shotTrail.insert(0, previous);
-        if (shotTrail.length > 14) shotTrail.removeLast();
-        for (final spark in shotSparks) {
-          spark.position += spark.velocity;
-          spark.velocity += const Offset(0, .18);
-          spark.life -= .055;
-        }
-        shotSparks.removeWhere((spark) => spark.life <= 0);
-        var point = previous + velocity;
-        if (point.dx < g.wallLeft || point.dx > g.wallRight) {
-          velocity = Offset(-velocity.dx, velocity.dy);
-          point = previous + velocity;
-        }
-        final collision = _firstCollision(previous, point, g);
-        if (collision != null) {
-          flightTimer?.cancel();
-          flightTimer = null;
-          flight = null;
-          shotTrail.clear();
-          final firedColor = flyingColor ?? current;
-          final firedBomb = flyingBomb;
-          final firedRocket = flyingRocket;
-          flyingColor = null;
-          flyingBomb = false;
-          flyingRocket = false;
-          if (firedBomb) {
-            _explodeBomb(collision.position, g);
-          } else if (firedRocket) {
-            _explodeRocket(collision.position, g, collision.cell);
-          } else {
-            _attach(
-              collision.position,
-              g,
-              firedColor,
-              collided: collision.cell,
-              velocity: velocity,
-            );
-          }
-        } else {
-          flight = point;
-        }
-      });
-    });
+    _flightVelocity = velocity;
+    _flightGeometry = g;
+    _lastFlightTick = null;
+    _flightTicker.start();
   }
 
   CandyCell? _attachmentFor(
@@ -2916,7 +3155,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     );
     if (!mounted) return;
     if (action == 'exit') {
-      flightTimer?.cancel();
+      _stopFlightTicker();
       widget.onExit();
     } else if (action == 'restart') {
       setState(_newLevel);
@@ -2927,7 +3166,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
   @override
   void dispose() {
-    flightTimer?.cancel();
+    _flightTicker.dispose();
     rowTimer?.cancel();
     launchController.dispose();
     popController.dispose();
@@ -3058,6 +3297,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                         .where(
                           (type) =>
                               type != BoosterType.extraSwap &&
+                              widget.model.isBoosterUnlocked(type) &&
                               widget.model.boosterCount(type) > 0,
                         )
                         .toList();
@@ -3083,392 +3323,406 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                       onPanEnd: (_) {
                         if (aimInput != null) _shoot(aimInput!, g);
                       },
-                      child: Stack(
-                        children: [
-                          Positioned.fill(
-                            child: CustomPaint(
-                              painter: AimPainter(path: aimPath),
-                            ),
-                          ),
-                          Positioned(
-                            left: g.wallLeft,
-                            right: g.size.width - g.wallRight,
-                            top: g.dangerLine - 17,
-                            child: IgnorePointer(
-                              child: Row(
-                                children: [
-                                  Expanded(
-                                    child: Container(
-                                      height: 3,
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xffff6b9b),
-                                        borderRadius: BorderRadius.circular(4),
-                                      ),
-                                    ),
-                                  ),
-                                  Container(
-                                    margin: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                    ),
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 13,
-                                      vertical: 6,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xfff6538a),
-                                      borderRadius: BorderRadius.circular(16),
-                                      border: Border.all(
-                                        color: const Color(0xffffb6d1),
-                                        width: 1.5,
-                                      ),
-                                    ),
-                                    child: const Text(
-                                      'DANGER ZONE',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 10,
-                                        letterSpacing: .4,
-                                        fontWeight: FontWeight.w900,
-                                      ),
-                                    ),
-                                  ),
-                                  Expanded(
-                                    child: Container(
-                                      height: 3,
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xffff6b9b),
-                                        borderRadius: BorderRadius.circular(4),
-                                      ),
-                                    ),
-                                  ),
-                                ],
+                      child: RepaintBoundary(
+                        child: Stack(
+                          children: [
+                            Positioned.fill(
+                              child: CustomPaint(
+                                painter: AimPainter(path: aimPath),
                               ),
                             ),
-                          ),
-                          AnimatedBuilder(
-                            animation: rowController,
-                            builder: (_, __) => Stack(
-                              children: [
-                                ...(rowAnimating ? movingBoard : board).map((
-                                  cell,
-                                ) {
-                                  final position = _displayPosition(cell, g);
-                                  return Positioned(
-                                    left: position.dx - candySize / 2,
-                                    top: position.dy - candySize / 2,
-                                    child: _boardCandy(cell, candySize),
-                                  );
-                                }),
-                                if (rowAnimating)
-                                  ...incomingRow.map((cell) {
-                                    final target = g.position(
-                                      cell,
-                                      phase: gridPhase - 1,
-                                    );
-                                    final progress = Curves.easeOut.transform(
-                                      rowController.value,
-                                    );
-                                    final position = Offset.lerp(
-                                      target - Offset(0, g.rowStep),
-                                      target,
-                                      progress,
-                                    )!;
+                            Positioned(
+                              left: g.wallLeft,
+                              right: g.size.width - g.wallRight,
+                              top: g.dangerLine - 17,
+                              child: IgnorePointer(
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Container(
+                                        height: 3,
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xffff6b9b),
+                                          borderRadius: BorderRadius.circular(
+                                            4,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    Container(
+                                      margin: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                      ),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 13,
+                                        vertical: 6,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xfff6538a),
+                                        borderRadius: BorderRadius.circular(16),
+                                        border: Border.all(
+                                          color: const Color(0xffffb6d1),
+                                          width: 1.5,
+                                        ),
+                                      ),
+                                      child: const Text(
+                                        'DANGER ZONE',
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 10,
+                                          letterSpacing: .4,
+                                          fontWeight: FontWeight.w900,
+                                        ),
+                                      ),
+                                    ),
+                                    Expanded(
+                                      child: Container(
+                                        height: 3,
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xffff6b9b),
+                                          borderRadius: BorderRadius.circular(
+                                            4,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            AnimatedBuilder(
+                              animation: rowController,
+                              builder: (_, __) => Stack(
+                                children: [
+                                  ...(rowAnimating ? movingBoard : board).map((
+                                    cell,
+                                  ) {
+                                    final position = _displayPosition(cell, g);
                                     return Positioned(
                                       left: position.dx - candySize / 2,
                                       top: position.dy - candySize / 2,
                                       child: _boardCandy(cell, candySize),
                                     );
                                   }),
-                              ],
-                            ),
-                          ),
-                          ...dropEffects.map(
-                            (effect) => Positioned(
-                              left: effect.position.dx - effect.size / 2,
-                              top: effect.position.dy - effect.size / 2,
-                              child: IgnorePointer(
-                                child: FallingCandyEffect(
-                                  effect: effect,
-                                  animation: dropController,
-                                ),
-                              ),
-                            ),
-                          ),
-                          if (rowWarning || rowAnimating)
-                            Positioned(
-                              left: 0,
-                              right: 0,
-                              top: math.max(4, g.top - 12),
-                              child: IgnorePointer(
-                                child: Center(
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 14,
-                                      vertical: 7,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xfff65371),
-                                      borderRadius: BorderRadius.circular(18),
-                                      border: Border.all(
-                                        color: Colors.white,
-                                        width: 2,
-                                      ),
-                                    ),
-                                    child: const Text(
-                                      'CEILING DROP!',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w900,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ...popEffects.map(
-                            (effect) => Positioned(
-                              left: effect.position.dx - effect.size / 2,
-                              top: effect.position.dy - effect.size / 2,
-                              child: IgnorePointer(
-                                child: PopCandyEffect(
-                                  effect: effect,
-                                  animation: popController,
-                                ),
-                              ),
-                            ),
-                          ),
-                          if (bombExplosion != null)
-                            Positioned(
-                              left: bombExplosion!.dx - candySize * 2,
-                              top: bombExplosion!.dy - candySize * 2,
-                              child: IgnorePointer(
-                                child: BombBlastEffect(
-                                  size: candySize * 4,
-                                  animation: bombController,
-                                ),
-                              ),
-                            ),
-                          if (rocketBlastY != null)
-                            Positioned(
-                              left: g.wallLeft,
-                              right: g.size.width - g.wallRight,
-                              top: rocketBlastY! - candySize * .5,
-                              child: IgnorePointer(
-                                child: RocketRowBlastEffect(
-                                  height: candySize,
-                                  animation: rocketController,
-                                ),
-                              ),
-                            ),
-                          ...shotSparks.map(
-                            (spark) => Positioned(
-                              left: spark.position.dx - 7,
-                              top: spark.position.dy - 7,
-                              child: IgnorePointer(
-                                child: Opacity(
-                                  opacity: spark.life.clamp(0, 1),
-                                  child: const Icon(
-                                    Icons.auto_awesome_rounded,
-                                    color: Color(0xfffff0a6),
-                                    size: 14,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                          ...shotTrail.asMap().entries.map((entry) {
-                            final fade =
-                                (shotTrail.length - entry.key) /
-                                (shotTrail.length + 1);
-                            final diameter = candySize * (.16 + fade * .20);
-                            return Positioned(
-                              left: entry.value.dx - diameter / 2,
-                              top: entry.value.dy - diameter / 2,
-                              child: IgnorePointer(
-                                child: Container(
-                                  width: diameter,
-                                  height: diameter,
-                                  decoration: BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    color:
-                                        (flyingBomb
-                                                ? const Color(0xff3d3146)
-                                                : flyingRocket
-                                                ? const Color(0xffff7a55)
-                                                : (flyingColor ?? current)
-                                                      .color)
-                                            .withValues(alpha: fade * .55),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: Colors.white.withValues(
-                                          alpha: fade * .65,
-                                        ),
-                                        blurRadius: 5,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            );
-                          }),
-                          if (flight != null)
-                            Positioned(
-                              left: flight!.dx - candySize / 2,
-                              top: flight!.dy - candySize / 2,
-                              child: AnimatedBuilder(
-                                animation: launchController,
-                                builder: (_, child) => Transform.scale(
-                                  scale:
-                                      1 +
-                                      .13 *
-                                          (1 -
-                                              Curves.easeOut.transform(
-                                                launchController.value,
-                                              )),
-                                  child: child,
-                                ),
-                                child: flyingBomb
-                                    ? BombCandy(size: candySize)
-                                    : flyingRocket
-                                    ? RocketCandy(size: candySize)
-                                    : CandyBall(
-                                        color: flyingColor ?? current,
-                                        size: candySize,
-                                      ),
-                              ),
-                            ),
-                          Positioned(
-                            left: 24,
-                            right: 24,
-                            bottom: 8,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 12,
-                              ),
-                              decoration: BoxDecoration(
-                                color: const Color(
-                                  0xff9b5ad0,
-                                ).withValues(alpha: .9),
-                                borderRadius: BorderRadius.circular(24),
-                                border: Border.all(
-                                  color: const Color(0xffffb3d1),
-                                  width: 2,
-                                ),
-                              ),
-                              child: Text(
-                                praise,
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w900,
-                                  fontSize: 16,
-                                ),
-                              ),
-                            ),
-                          ),
-                          Positioned(
-                            left: g.launcher.dx - candySize * .68,
-                            bottom: 72,
-                            child: AnimatedBuilder(
-                              animation: launchController,
-                              builder: (_, child) {
-                                final recoil =
-                                    math.sin(launchController.value * math.pi) *
-                                    9;
-                                return Transform.translate(
-                                  offset: Offset(0, recoil),
-                                  child: Transform.scale(
-                                    scale:
-                                        1 +
-                                        math.sin(
-                                              launchController.value * math.pi,
-                                            ) *
-                                            .055,
-                                    child: child,
-                                  ),
-                                );
-                              },
-                              child: LollipopLauncher(
-                                color: current,
-                                size: candySize * 1.36,
-                                isBomb: activeBooster == BoosterType.bomb,
-                                isRocket: activeBooster == BoosterType.rocket,
-                              ),
-                            ),
-                          ),
-                          Positioned(
-                            right: 14,
-                            bottom: 88,
-                            child: CandySlotCard(
-                              label: 'NEXT',
-                              onTap: _swapNextCandy,
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  CandyBall(color: next, size: candySize * .72),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    freeSwaps > 0
-                                        ? 'FREE SWAP'
-                                        : 'SWAPS ×${widget.model.extraSwapBoosters}',
-                                    style: const TextStyle(
-                                      color: Color(0xfff6538a),
-                                      fontSize: 8,
-                                      fontWeight: FontWeight.w900,
-                                    ),
-                                  ),
+                                  if (rowAnimating)
+                                    ...incomingRow.map((cell) {
+                                      final target = g.position(
+                                        cell,
+                                        phase: gridPhase - 1,
+                                      );
+                                      final progress = Curves.easeOut.transform(
+                                        rowController.value,
+                                      );
+                                      final position = Offset.lerp(
+                                        target - Offset(0, g.rowStep),
+                                        target,
+                                        progress,
+                                      )!;
+                                      return Positioned(
+                                        left: position.dx - candySize / 2,
+                                        top: position.dy - candySize / 2,
+                                        child: _boardCandy(cell, candySize),
+                                      );
+                                    }),
                                 ],
                               ),
                             ),
-                          ),
-                          Positioned(
-                            left: 14,
-                            bottom: 88,
-                            child: BoosterSlotCard(
-                              type: shownBooster,
-                              count: shownBooster == null
-                                  ? 0
-                                  : widget.model.boosterCount(shownBooster),
-                              selected: activeBooster == shownBooster,
-                              onTap: shownBooster == null
-                                  ? null
-                                  : () => _showBoosterPicker(availableBoosters),
+                            ...dropEffects.map(
+                              (effect) => Positioned(
+                                left: effect.position.dx - effect.size / 2,
+                                top: effect.position.dy - effect.size / 2,
+                                child: IgnorePointer(
+                                  child: FallingCandyEffect(
+                                    effect: effect,
+                                    animation: dropController,
+                                  ),
+                                ),
+                              ),
                             ),
-                          ),
-                          if (finished && !showFullScreenResultOverlay)
-                            ResultOverlay(
-                              won: won,
-                              candiesCleared: cleared,
-                              stars: _earnedStars,
-                              score: score,
-                              coinsEarned: won ? 15 + _earnedStars * 10 : 0,
-                              goal:
-                                  widget.config.objective == ObjectiveType.clear
-                                  ? 'Reach ${widget.config.target} candies'
-                                  : 'Clear all the candies',
-                              chapterName: chapterComplete
-                                  ? completedChapter!.name.toUpperCase()
-                                  : null,
-                              chapterReward: chapterComplete
-                                  ? '${completedChapter!.reward.emoji} ${completedChapter!.reward.label.toUpperCase()} ×${completedChapter!.rewardAmount}\n🪙 +${completedChapter!.coinReward} COINS'
-                                  : null,
-                              onPrimary: won
-                                  ? chapterComplete
-                                        ? () async {
-                                            await widget.model
-                                                .claimChapterReward(
-                                                  completedChapter!,
-                                                );
-                                            widget.onExit();
-                                          }
-                                        : widget.onNext
-                                  : () => setState(_newLevel),
-                              onReplay: () => setState(_newLevel),
-                              onSecondary: widget.onExit,
+                            if (rowWarning || rowAnimating)
+                              Positioned(
+                                left: 0,
+                                right: 0,
+                                top: math.max(4, g.top - 12),
+                                child: IgnorePointer(
+                                  child: Center(
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 14,
+                                        vertical: 7,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xfff65371),
+                                        borderRadius: BorderRadius.circular(18),
+                                        border: Border.all(
+                                          color: Colors.white,
+                                          width: 2,
+                                        ),
+                                      ),
+                                      child: const Text(
+                                        'CEILING DROP!',
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w900,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ...popEffects.map(
+                              (effect) => Positioned(
+                                left: effect.position.dx - effect.size / 2,
+                                top: effect.position.dy - effect.size / 2,
+                                child: IgnorePointer(
+                                  child: PopCandyEffect(
+                                    effect: effect,
+                                    animation: popController,
+                                  ),
+                                ),
+                              ),
                             ),
-                        ],
+                            if (bombExplosion != null)
+                              Positioned(
+                                left: bombExplosion!.dx - candySize * 2,
+                                top: bombExplosion!.dy - candySize * 2,
+                                child: IgnorePointer(
+                                  child: BombBlastEffect(
+                                    size: candySize * 4,
+                                    animation: bombController,
+                                  ),
+                                ),
+                              ),
+                            if (rocketBlastY != null)
+                              Positioned(
+                                left: g.wallLeft,
+                                right: g.size.width - g.wallRight,
+                                top: rocketBlastY! - candySize * .5,
+                                child: IgnorePointer(
+                                  child: RocketRowBlastEffect(
+                                    height: candySize,
+                                    animation: rocketController,
+                                  ),
+                                ),
+                              ),
+                            ...shotSparks.map(
+                              (spark) => Positioned(
+                                left: spark.position.dx - 7,
+                                top: spark.position.dy - 7,
+                                child: IgnorePointer(
+                                  child: Opacity(
+                                    opacity: spark.life.clamp(0, 1),
+                                    child: const Icon(
+                                      Icons.auto_awesome_rounded,
+                                      color: Color(0xfffff0a6),
+                                      size: 14,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            ...shotTrail.asMap().entries.map((entry) {
+                              final fade =
+                                  (shotTrail.length - entry.key) /
+                                  (shotTrail.length + 1);
+                              final diameter = candySize * (.16 + fade * .20);
+                              return Positioned(
+                                left: entry.value.dx - diameter / 2,
+                                top: entry.value.dy - diameter / 2,
+                                child: IgnorePointer(
+                                  child: Container(
+                                    width: diameter,
+                                    height: diameter,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color:
+                                          (flyingBomb
+                                                  ? const Color(0xff3d3146)
+                                                  : flyingRocket
+                                                  ? const Color(0xffff7a55)
+                                                  : (flyingColor ?? current)
+                                                        .color)
+                                              .withValues(alpha: fade * .55),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.white.withValues(
+                                            alpha: fade * .65,
+                                          ),
+                                          blurRadius: 5,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }),
+                            if (flight != null)
+                              Positioned(
+                                left: flight!.dx - candySize / 2,
+                                top: flight!.dy - candySize / 2,
+                                child: AnimatedBuilder(
+                                  animation: launchController,
+                                  builder: (_, child) => Transform.scale(
+                                    scale:
+                                        1 +
+                                        .13 *
+                                            (1 -
+                                                Curves.easeOut.transform(
+                                                  launchController.value,
+                                                )),
+                                    child: child,
+                                  ),
+                                  child: flyingBomb
+                                      ? BombCandy(size: candySize)
+                                      : flyingRocket
+                                      ? RocketCandy(size: candySize)
+                                      : CandyBall(
+                                          color: flyingColor ?? current,
+                                          size: candySize,
+                                        ),
+                                ),
+                              ),
+                            Positioned(
+                              left: 24,
+                              right: 24,
+                              bottom: 8,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 12,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(
+                                    0xff9b5ad0,
+                                  ).withValues(alpha: .9),
+                                  borderRadius: BorderRadius.circular(24),
+                                  border: Border.all(
+                                    color: const Color(0xffffb3d1),
+                                    width: 2,
+                                  ),
+                                ),
+                                child: Text(
+                                  praise,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w900,
+                                    fontSize: 16,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            Positioned(
+                              left: g.launcher.dx - candySize * .68,
+                              bottom: 72,
+                              child: AnimatedBuilder(
+                                animation: launchController,
+                                builder: (_, child) {
+                                  final recoil =
+                                      math.sin(
+                                        launchController.value * math.pi,
+                                      ) *
+                                      9;
+                                  return Transform.translate(
+                                    offset: Offset(0, recoil),
+                                    child: Transform.scale(
+                                      scale:
+                                          1 +
+                                          math.sin(
+                                                launchController.value *
+                                                    math.pi,
+                                              ) *
+                                              .055,
+                                      child: child,
+                                    ),
+                                  );
+                                },
+                                child: LollipopLauncher(
+                                  color: current,
+                                  size: candySize * 1.36,
+                                  isBomb: activeBooster == BoosterType.bomb,
+                                  isRocket: activeBooster == BoosterType.rocket,
+                                ),
+                              ),
+                            ),
+                            Positioned(
+                              right: 14,
+                              bottom: 88,
+                              child: CandySlotCard(
+                                label: 'NEXT',
+                                onTap: _swapNextCandy,
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    CandyBall(
+                                      color: next,
+                                      size: candySize * .72,
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      freeSwaps > 0
+                                          ? 'FREE SWAP'
+                                          : 'SWAPS ×${widget.model.extraSwapBoosters}',
+                                      style: const TextStyle(
+                                        color: Color(0xfff6538a),
+                                        fontSize: 8,
+                                        fontWeight: FontWeight.w900,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            Positioned(
+                              left: 14,
+                              bottom: 88,
+                              child: BoosterSlotCard(
+                                type: shownBooster,
+                                count: shownBooster == null
+                                    ? 0
+                                    : widget.model.boosterCount(shownBooster),
+                                selected: activeBooster == shownBooster,
+                                onTap: shownBooster == null
+                                    ? null
+                                    : () =>
+                                          _showBoosterPicker(availableBoosters),
+                              ),
+                            ),
+                            if (finished && !showFullScreenResultOverlay)
+                              ResultOverlay(
+                                won: won,
+                                candiesCleared: cleared,
+                                stars: _earnedStars,
+                                score: score,
+                                coinsEarned: won ? 15 + _earnedStars * 10 : 0,
+                                goal:
+                                    widget.config.objective ==
+                                        ObjectiveType.clear
+                                    ? 'Reach ${widget.config.target} candies'
+                                    : 'Clear all the candies',
+                                chapterName: chapterComplete
+                                    ? completedChapter!.name.toUpperCase()
+                                    : null,
+                                chapterReward: chapterComplete
+                                    ? '${completedChapter!.reward.emoji} ${completedChapter!.reward.label.toUpperCase()} ×${completedChapter!.rewardAmount}\n🪙 +${completedChapter!.coinReward} COINS'
+                                    : null,
+                                onPrimary: won
+                                    ? chapterComplete
+                                          ? () async {
+                                              await widget.model
+                                                  .claimChapterReward(
+                                                    completedChapter!,
+                                                  );
+                                              widget.onExit();
+                                            }
+                                          : widget.onNext
+                                    : () => setState(_newLevel),
+                                onReplay: () => setState(_newLevel),
+                                onSecondary: widget.onExit,
+                              ),
+                          ],
+                        ),
                       ),
                     );
                   },
@@ -4103,17 +4357,14 @@ class SettingsScreen extends StatelessWidget {
                 children: [
                   CollectionSpinHero(
                     canSpin: model.canLuckySpin,
+                    prizes: model.luckySpinPrizes,
                     onTap: () => showDialog<void>(
                       context: context,
                       builder: (_) => LuckySpinDialog(model: model),
                     ),
                   ),
                   const SizedBox(height: 12),
-                  CollectionBoosterSummary(
-                    bombCount: model.bombBoosters,
-                    rainbowCount: model.rainbowBoosters,
-                    lightningCount: model.lightningBoosters,
-                  ),
+                  CollectionBoosterSummary(model: model),
                   const SizedBox(height: 15),
                   CollectionRewardCard(
                     name: 'Classic Pop',
@@ -4373,7 +4624,7 @@ class HowToPlayScreen extends StatelessWidget {
                   icon: Icons.auto_awesome_rounded,
                   title: 'USE BOOSTERS',
                   text:
-                      'Bomb, Rainbow, Lightning, and Golden Aim help when the board gets tricky. Buy more in the Shop.',
+                      'Bomb and Golden Aim help when the board gets tricky. More boosters unlock as you progress.',
                 ),
                 HowToPlayStep(
                   number: '5',
@@ -4572,8 +4823,12 @@ class LeaderboardScreen extends StatelessWidget {
   final VoidCallback onSignIn;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => _buildPublicGlobal(context);
+
+  Widget legacyBuild(BuildContext context) {
     final user = model.auth.currentUser;
+    final canViewPrivateBoard = user != null;
+    if (!canViewPrivateBoard) return _buildPublicGlobal(context);
     return GradientScaffold(
       child: SafeArea(
         child: Column(
@@ -4618,7 +4873,7 @@ class LeaderboardScreen extends StatelessWidget {
                 ),
               ),
             ),
-            if (user == null)
+            if (_showSignInPrompt())
               Expanded(
                 child: Padding(
                   padding: const EdgeInsets.all(20),
@@ -4729,6 +4984,112 @@ class LeaderboardScreen extends StatelessWidget {
       ),
     );
   }
+
+  Widget _buildPublicGlobal(BuildContext context) => GradientScaffold(
+    child: SafeArea(
+      child: Column(
+        children: [
+          PageHeader(
+            title: 'GLOBAL RANKS',
+            onBack: onBack,
+            trailing: CoinPill(coins: model.coins),
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 0, 20, 10),
+            child: Panel(
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.public_rounded,
+                    color: Color(0xffffb725),
+                    size: 38,
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'WORLDWIDE PROGRESS',
+                          style: TextStyle(
+                            color: Color(0xff654486),
+                            fontSize: 17,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        SizedBox(height: 2),
+                        Text(
+                          'Ranked by level, then stars, then best score.',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (model.auth.currentUser == null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+              child: FilledButton.icon(
+                onPressed: onSignIn,
+                icon: const Icon(Icons.login_rounded),
+                label: const Text('SIGN IN TO JOIN THE RANKS'),
+              ),
+            )
+          else
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 0, 20, 10),
+              child: Text(
+                'Your completed levels update this board automatically.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          Expanded(
+            child: StreamBuilder<List<PublicLeaderboardEntry>>(
+              stream: model.leaderboard.watchGlobalProgress(),
+              builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return const _LeaderboardMessage(
+                    icon: Icons.cloud_off_rounded,
+                    title: 'LEADERBOARD UNAVAILABLE',
+                    message: 'Please check your connection and try again.',
+                  );
+                }
+                if (!snapshot.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                final entries = snapshot.data!;
+                if (entries.isEmpty) {
+                  return const _LeaderboardMessage(
+                    icon: Icons.auto_awesome_rounded,
+                    title: 'BE THE FIRST!',
+                    message:
+                        'Sign in and finish a level to join the global ranks.',
+                  );
+                }
+                return ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+                  itemCount: entries.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 9),
+                  itemBuilder: (_, index) =>
+                      PublicLeaderboardRankCard(entry: entries[index]),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  bool _showSignInPrompt() => model.auth.currentUser == null;
 }
 
 class _LeaderboardMessage extends StatelessWidget {
@@ -4858,6 +5219,94 @@ class LeaderboardRankCard extends StatelessWidget {
   );
 }
 
+class PublicLeaderboardRankCard extends StatelessWidget {
+  const PublicLeaderboardRankCard({super.key, required this.entry});
+
+  final PublicLeaderboardEntry entry;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+    decoration: BoxDecoration(
+      color: Colors.white.withValues(alpha: .94),
+      borderRadius: BorderRadius.circular(18),
+      border: Border.all(color: const Color(0xffffd5eb), width: 2),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x22003583),
+          offset: Offset(0, 3),
+          blurRadius: 0,
+        ),
+      ],
+    ),
+    child: Row(
+      children: [
+        SizedBox(
+          width: 44,
+          child: Text(
+            '#${entry.rank}',
+            style: const TextStyle(
+              color: Color(0xff654486),
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+        Icon(
+          entry.rank == 1
+              ? Icons.workspace_premium_rounded
+              : Icons.person_rounded,
+          color: entry.rank == 1
+              ? const Color(0xffffb725)
+              : const Color(0xff8d76aa),
+          size: 24,
+        ),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                entry.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Color(0xff4e385a),
+                  fontWeight: FontWeight.w900,
+                  fontSize: 16,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                'LEVEL ${entry.levelReached}  •  ${entry.totalStars} STARS',
+                style: const TextStyle(
+                  color: Color(0xff8d76aa),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const Icon(
+          Icons.emoji_events_rounded,
+          color: Color(0xffffb725),
+          size: 19,
+        ),
+        const SizedBox(width: 4),
+        Text(
+          '${entry.score}',
+          style: const TextStyle(
+            color: Color(0xff654486),
+            fontWeight: FontWeight.w900,
+            fontSize: 16,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
 class BoosterShopScreen extends StatelessWidget {
   const BoosterShopScreen({
     super.key,
@@ -4965,33 +5414,42 @@ class BoosterShopScreen extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: ListView.separated(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-              itemCount: offers.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 12),
-              itemBuilder: (context, index) {
-                final offer = offers[index];
-                return ShopOfferCard(
-                  offer: offer,
-                  count: model.boosterCount(offer.type),
-                  affordable: model.coins >= offer.price,
-                  onBuy: () async {
-                    final bought = await model.buyBooster(
-                      offer.type,
-                      offer.price,
+            child: Builder(
+              builder: (context) {
+                final visibleOffers = offers
+                    .where((offer) => model.isBoosterUnlocked(offer.type))
+                    .toList();
+                return ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+                  itemCount: visibleOffers.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 12),
+                  itemBuilder: (context, index) {
+                    final offer = visibleOffers[index];
+                    return ShopOfferCard(
+                      offer: offer,
+                      count: model.boosterCount(offer.type),
+                      unlocked: true,
+                      unlockLevel: model.boosterUnlockLevel(offer.type),
+                      affordable: model.coins >= offer.price,
+                      onBuy: () async {
+                        final bought = await model.buyBooster(
+                          offer.type,
+                          offer.price,
+                        );
+                        if (!context.mounted) return;
+                        if (bought) {
+                          await showPurchaseSuccess(context, offer);
+                        } else {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                'You need ${offer.price} coins for ${offer.type.label}.',
+                              ),
+                            ),
+                          );
+                        }
+                      },
                     );
-                    if (!context.mounted) return;
-                    if (bought) {
-                      await showPurchaseSuccess(context, offer);
-                    } else {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            'You need ${offer.price} coins for ${offer.type.label}.',
-                          ),
-                        ),
-                      );
-                    }
                   },
                 );
               },
@@ -5115,12 +5573,16 @@ class ShopOfferCard extends StatelessWidget {
     super.key,
     required this.offer,
     required this.count,
+    required this.unlocked,
+    required this.unlockLevel,
     required this.affordable,
     required this.onBuy,
   });
 
   final ShopOffer offer;
   final int count;
+  final bool unlocked;
+  final int unlockLevel;
   final bool affordable;
   final VoidCallback onBuy;
 
@@ -5154,7 +5616,7 @@ class ShopOfferCard extends StatelessWidget {
               Text(offer.description, style: const TextStyle(fontSize: 11)),
               const SizedBox(height: 5),
               Text(
-                'YOU HAVE ×$count',
+                unlocked ? 'YOU HAVE ×$count' : 'UNLOCKS AT LEVEL $unlockLevel',
                 style: const TextStyle(
                   color: Color(0xfff6538a),
                   fontSize: 10,
@@ -5166,18 +5628,23 @@ class ShopOfferCard extends StatelessWidget {
         ),
         const SizedBox(width: 8),
         FilledButton(
-          onPressed: affordable ? onBuy : null,
+          onPressed: unlocked && affordable ? onBuy : null,
           style: FilledButton.styleFrom(
-            backgroundColor: const Color(0xfff6538a),
+            backgroundColor: unlocked
+                ? const Color(0xfff6538a)
+                : const Color(0xffb9afca),
             foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text('BUY', style: TextStyle(fontWeight: FontWeight.w900)),
               Text(
-                '${offer.price}',
+                unlocked ? 'BUY' : 'LOCKED',
+                style: const TextStyle(fontWeight: FontWeight.w900),
+              ),
+              Text(
+                unlocked ? '${offer.price}' : 'LV $unlockLevel',
                 style: const TextStyle(fontWeight: FontWeight.w900),
               ),
             ],
@@ -5210,7 +5677,7 @@ class _LuckySpinDialogState extends State<LuckySpinDialog>
     if (won == null || !mounted) return;
     // End with the selected prize beneath the fixed pointer.
     setState(() {
-      _targetAngle = math.pi * 12 - won.index * math.pi * 2 / 6;
+      _targetAngle = math.pi * 12 - won.index * math.pi * 2 / won.segmentCount;
     });
     controller.forward(from: 0);
     await Future<void>.delayed(const Duration(milliseconds: 1800));
@@ -5221,6 +5688,7 @@ class _LuckySpinDialogState extends State<LuckySpinDialog>
   Widget build(BuildContext context) => LuckySpinLayout(
     turns: controller,
     targetAngle: _targetAngle,
+    prizes: widget.model.luckySpinPrizes,
     canSpin: widget.model.canLuckySpin,
     reward: reward,
     onSpin: _spin,
@@ -5296,6 +5764,7 @@ class LuckySpinLayout extends StatelessWidget {
     super.key,
     required this.turns,
     required this.targetAngle,
+    required this.prizes,
     required this.canSpin,
     required this.reward,
     required this.onSpin,
@@ -5304,6 +5773,7 @@ class LuckySpinLayout extends StatelessWidget {
 
   final Animation<double> turns;
   final double targetAngle;
+  final List<LuckySpinPrize> prizes;
   final bool canSpin;
   final LuckySpinReward? reward;
   final VoidCallback onSpin;
@@ -5372,6 +5842,7 @@ class LuckySpinLayout extends StatelessWidget {
                         size: math.min(constraints.maxWidth, 365),
                         turns: turns,
                         targetAngle: targetAngle,
+                        prizes: prizes,
                       ),
                     ),
                     const SizedBox(height: 10),
@@ -5538,21 +6009,14 @@ class LuckySpinWheel extends StatelessWidget {
     super.key,
     required this.size,
     required this.turns,
+    required this.prizes,
     this.targetAngle = 0,
   });
 
   final double size;
   final Animation<double> turns;
+  final List<LuckySpinPrize> prizes;
   final double targetAngle;
-
-  static const _prizes = [
-    _LuckyWheelPrize('50\nCOINS', Icons.monetization_on_rounded),
-    _LuckyWheelPrize('100\nCOINS', Icons.monetization_on_rounded),
-    _LuckyWheelPrize('BOMB', Icons.warning_amber_rounded),
-    _LuckyWheelPrize('RAINBOW', Icons.brightness_5_rounded),
-    _LuckyWheelPrize('LIGHTNING', Icons.bolt_rounded),
-    _LuckyWheelPrize('MYSTERY', Icons.card_giftcard_rounded),
-  ];
 
   @override
   Widget build(BuildContext context) => SizedBox.square(
@@ -5590,12 +6054,15 @@ class LuckySpinWheel extends StatelessWidget {
               alignment: Alignment.center,
               children: [
                 Positioned.fill(
-                  child: CustomPaint(painter: LuckyWheelPainter()),
+                  child: CustomPaint(
+                    painter: LuckyWheelPainter(segmentCount: prizes.length),
+                  ),
                 ),
-                for (var index = 0; index < _prizes.length; index++)
+                for (var index = 0; index < prizes.length; index++)
                   _LuckyWheelPrizeLabel(
-                    prize: _prizes[index],
+                    prize: prizes[index],
                     index: index,
+                    segmentCount: prizes.length,
                     diameter: size * .9,
                     turns: turns,
                     targetAngle: targetAngle,
@@ -5644,31 +6111,26 @@ class LuckySpinWheel extends StatelessWidget {
   );
 }
 
-class _LuckyWheelPrize {
-  const _LuckyWheelPrize(this.label, this.icon);
-
-  final String label;
-  final IconData icon;
-}
-
 class _LuckyWheelPrizeLabel extends StatelessWidget {
   const _LuckyWheelPrizeLabel({
     required this.prize,
     required this.index,
+    required this.segmentCount,
     required this.diameter,
     required this.turns,
     required this.targetAngle,
   });
 
-  final _LuckyWheelPrize prize;
+  final LuckySpinPrize prize;
   final int index;
+  final int segmentCount;
   final double diameter;
   final Animation<double> turns;
   final double targetAngle;
 
   @override
   Widget build(BuildContext context) {
-    final angle = -math.pi / 2 + index * math.pi * 2 / 6;
+    final angle = -math.pi / 2 + index * math.pi * 2 / segmentCount;
     final radius = diameter * .315;
     final labelSize = diameter * .19;
     return Positioned(
@@ -5693,7 +6155,7 @@ class _LuckyWheelPrizeLabel extends StatelessWidget {
               children: [
                 Icon(prize.icon, color: Colors.white, size: labelSize * .55),
                 Text(
-                  prize.label,
+                  prize.wheelLabel,
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     color: Colors.white,
@@ -5715,6 +6177,10 @@ class _LuckyWheelPrizeLabel extends StatelessWidget {
 }
 
 class LuckyWheelPainter extends CustomPainter {
+  const LuckyWheelPainter({required this.segmentCount});
+
+  final int segmentCount;
+
   static const _colors = [
     Color(0xff9552da),
     Color(0xff228ed4),
@@ -5728,10 +6194,10 @@ class LuckyWheelPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final center = size.center(Offset.zero);
     final radius = size.shortestSide / 2;
-    const slice = math.pi * 2 / 6;
+    final slice = math.pi * 2 / segmentCount;
     final wedge = Paint()..style = PaintingStyle.fill;
-    for (var index = 0; index < 6; index++) {
-      wedge.color = _colors[index];
+    for (var index = 0; index < segmentCount; index++) {
+      wedge.color = _colors[index % _colors.length];
       canvas.drawArc(
         Rect.fromCircle(center: center, radius: radius),
         -math.pi / 2 - slice / 2 + index * slice,
@@ -5744,7 +6210,7 @@ class LuckyWheelPainter extends CustomPainter {
       ..color = Colors.white.withValues(alpha: .82)
       ..strokeWidth = 2.5
       ..style = PaintingStyle.stroke;
-    for (var index = 0; index < 6; index++) {
+    for (var index = 0; index < segmentCount; index++) {
       final angle = -math.pi / 2 - slice / 2 + index * slice;
       canvas.drawLine(
         center,
@@ -5770,7 +6236,8 @@ class LuckyWheelPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant LuckyWheelPainter oldDelegate) => false;
+  bool shouldRepaint(covariant LuckyWheelPainter oldDelegate) =>
+      oldDelegate.segmentCount != segmentCount;
 }
 
 class LuckySpinBackgroundPainter extends CustomPainter {
@@ -7861,10 +8328,12 @@ class CollectionSpinHero extends StatelessWidget {
   const CollectionSpinHero({
     super.key,
     required this.canSpin,
+    required this.prizes,
     required this.onTap,
   });
 
   final bool canSpin;
+  final List<LuckySpinPrize> prizes;
   final VoidCallback onTap;
 
   @override
@@ -7893,6 +8362,7 @@ class CollectionSpinHero extends StatelessWidget {
             child: LuckySpinWheel(
               size: 200,
               turns: const AlwaysStoppedAnimation<double>(0),
+              prizes: prizes,
             ),
           ),
           Positioned(
@@ -7959,16 +8429,39 @@ class CollectionSpinHero extends StatelessWidget {
 }
 
 class CollectionBoosterSummary extends StatelessWidget {
-  const CollectionBoosterSummary({
-    super.key,
-    required this.bombCount,
-    required this.rainbowCount,
-    required this.lightningCount,
-  });
+  const CollectionBoosterSummary({super.key, required this.model});
 
-  final int bombCount;
-  final int rainbowCount;
-  final int lightningCount;
+  final AppModel model;
+
+  static const _displayOrder = <BoosterType>[
+    BoosterType.bomb,
+    BoosterType.goldenAim,
+    BoosterType.rainbow,
+    BoosterType.lightning,
+    BoosterType.colorBlast,
+    BoosterType.rocket,
+    BoosterType.megaBomb,
+  ];
+
+  IconData _iconFor(BoosterType type) => switch (type) {
+    BoosterType.bomb || BoosterType.megaBomb => Icons.warning_amber_rounded,
+    BoosterType.rainbow => Icons.brightness_5_rounded,
+    BoosterType.lightning => Icons.bolt_rounded,
+    BoosterType.colorBlast => Icons.color_lens_rounded,
+    BoosterType.rocket => Icons.rocket_launch_rounded,
+    BoosterType.goldenAim => Icons.gps_fixed_rounded,
+    BoosterType.extraSwap => Icons.swap_horiz_rounded,
+  };
+
+  Color _colorFor(BoosterType type) => switch (type) {
+    BoosterType.bomb || BoosterType.megaBomb => const Color(0xff3d3146),
+    BoosterType.rainbow => const Color(0xfff6538a),
+    BoosterType.lightning => const Color(0xffffbd2f),
+    BoosterType.colorBlast => const Color(0xffa66bdd),
+    BoosterType.rocket => const Color(0xffff795b),
+    BoosterType.goldenAim => const Color(0xffffad22),
+    BoosterType.extraSwap => const Color(0xff58aeed),
+  };
 
   @override
   Widget build(BuildContext context) => Container(
@@ -7999,35 +8492,33 @@ class CollectionBoosterSummary extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: CollectionBoosterStat(
-                icon: Icons.warning_amber_rounded,
-                color: const Color(0xff3d3146),
-                label: 'Bomb',
-                count: bombCount,
-              ),
-            ),
-            Container(width: 1, height: 38, color: const Color(0xffeadfeb)),
-            Expanded(
-              child: CollectionBoosterStat(
-                icon: Icons.brightness_5_rounded,
-                color: const Color(0xfff6538a),
-                label: 'Rainbow',
-                count: rainbowCount,
-              ),
-            ),
-            Container(width: 1, height: 38, color: const Color(0xffeadfeb)),
-            Expanded(
-              child: CollectionBoosterStat(
-                icon: Icons.bolt_rounded,
-                color: const Color(0xffffbd2f),
-                label: 'Lightning',
-                count: lightningCount,
-              ),
-            ),
-          ],
+        LayoutBuilder(
+          builder: (_, constraints) {
+            final boosters = _displayOrder
+                .where(model.isBoosterUnlocked)
+                .toList();
+            final columns = boosters.length <= 2 ? boosters.length : 3;
+            const spacing = 8.0;
+            final itemWidth =
+                (constraints.maxWidth - spacing * (columns - 1)) / columns;
+            return Wrap(
+              alignment: WrapAlignment.center,
+              spacing: spacing,
+              runSpacing: 10,
+              children: [
+                for (final type in boosters)
+                  SizedBox(
+                    width: itemWidth,
+                    child: CollectionBoosterStat(
+                      icon: _iconFor(type),
+                      color: _colorFor(type),
+                      label: type.label,
+                      count: model.boosterCount(type),
+                    ),
+                  ),
+              ],
+            );
+          },
         ),
       ],
     ),
