@@ -1,18 +1,4 @@
-git add .gitignore README.md `
-  android/app/build.gradle.kts `
-  android/app/src/main/AndroidManifest.xml `
-  android/key.properties.example `
-  lib/main.dart `
-  lib/models/game_models.dart `
-  lib/services/auth_service.dart `
-  lib/services/leaderboard_service.dart `
-  lib/services/progress_service.dart `
-  pubspec.yaml `
-  web/index.html `
-  web/manifest.json `
-  test/leaderboard_service_test.dart `
-  supabase/migrations/20260827232000_harden_leaderboard_submission.sql `
-  supabase/migrations/20260901090000_lock_down_leaderboard_tables.sql-- Leaderboard source tables are written only by the SECURITY DEFINER RPC.
+-- Leaderboard source tables are written only by the SECURITY DEFINER RPC.
 -- The Flutter publishable client may read the deliberately public views, but
 -- must never be able to forge rows or retrieve player UUIDs from these tables.
 
