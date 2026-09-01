@@ -52,6 +52,11 @@ class LevelConfig {
 
 enum CandyColor { strawberry, lemon, mint, blueberry, grape }
 
+/// Board-only candy behaviours introduced in the later worlds.  A cell keeps
+/// its colour as well, so special candies still live in the same logical hex
+/// grid as normal candies.
+enum CandySpecial { ice, rainbow, striped, colorBomb }
+
 enum BoosterType {
   bomb,
   rainbow,
@@ -140,6 +145,8 @@ class CandyCell {
     this.color, {
     this.isMystery = false,
     this.isBomb = false,
+    this.special,
+    this.iceLayers = 0,
   });
 
   final int row;
@@ -147,6 +154,35 @@ class CandyCell {
   final CandyColor color;
   final bool isMystery;
   final bool isBomb;
+  final CandySpecial? special;
+
+  /// Ice takes two normal hits to break. It is still removed immediately by
+  /// destructive boosters such as Bomb, Lightning and Rocket.
+  final int iceLayers;
+
+  bool get isIce => special == CandySpecial.ice;
+  bool get isRainbow => special == CandySpecial.rainbow;
+  bool get isStriped => special == CandySpecial.striped;
+  bool get isColorBomb => special == CandySpecial.colorBomb;
+
+  CandyCell copyWith({
+    int? row,
+    int? col,
+    CandyColor? color,
+    bool? isMystery,
+    bool? isBomb,
+    CandySpecial? special,
+    bool clearSpecial = false,
+    int? iceLayers,
+  }) => CandyCell(
+    row ?? this.row,
+    col ?? this.col,
+    color ?? this.color,
+    isMystery: isMystery ?? this.isMystery,
+    isBomb: isBomb ?? this.isBomb,
+    special: clearSpecial ? null : (special ?? this.special),
+    iceLayers: iceLayers ?? this.iceLayers,
+  );
 
   String get key => '$row:$col';
 }

@@ -47,7 +47,14 @@ class AuthService {
   }
 
   Future<void> resetPassword(String email) =>
-      _client.auth.resetPasswordForEmail(email.trim());
+      _client.auth.resetPasswordForEmail(
+        email.trim(),
+        // Password recovery must use the same Android deep link as sign-up
+        // and Google OAuth. Without this, Supabase falls back to the Site URL
+        // (currently a localhost URL) and the recovery link appears broken on
+        // a phone.
+        redirectTo: kIsWeb ? null : _mobileRedirectUrl,
+      );
 
   Future<void> signOut() => _client.auth.signOut();
 }

@@ -1,11 +1,11 @@
 {
-    "name": "candy_shooter",
-    "short_name": "candy_shooter",
+    "name": "Candy Shooter",
+    "short_name": "Candy Shooter",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "Pop, match, and conquer sweet candy challenges.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

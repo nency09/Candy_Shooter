@@ -2,8 +2,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'supabase_service.dart';
 
-/// Authenticated weekly ranking entry. It is used for the signed-in player's
-/// existing live weekly board, where the app can safely highlight its owner.
+/// Legacy private-board entry retained only for the unreachable legacy screen.
+/// Public leaderboard views deliberately never expose a player UUID.
 class WeeklyLeaderboardEntry {
   const WeeklyLeaderboardEntry({
     required this.uid,
@@ -73,31 +73,13 @@ class LeaderboardService {
     return '${monday.year}-${twoDigits(monday.month)}-${twoDigits(monday.day)}';
   }
 
-  Stream<List<WeeklyLeaderboardEntry>> watchTop({int limit = 20}) {
-    if (!_isAvailable) return Stream.value(const <WeeklyLeaderboardEntry>[]);
-    return _client
-        .from('weekly_scores')
-        .stream(primaryKey: ['week_start', 'user_id'])
-        .eq('week_start', currentWeekId())
-        .order('score', ascending: false)
-        .limit(limit)
-        .map((rows) => rows.map(WeeklyLeaderboardEntry.fromMap).toList());
-  }
+  /// The database no longer grants clients direct access to the source score
+  /// table.  These legacy APIs are intentionally inert; current UI uses the
+  /// safe public views below.
+  Stream<List<WeeklyLeaderboardEntry>> watchTop({int limit = 20}) =>
+      Stream.value(const <WeeklyLeaderboardEntry>[]);
 
-  Stream<WeeklyLeaderboardEntry?> watchPlayer(String uid) {
-    if (!_isAvailable) return Stream.value(null);
-    return _client
-        .from('weekly_scores')
-        .stream(primaryKey: ['week_start', 'user_id'])
-        .eq('week_start', currentWeekId())
-        .map((rows) {
-          final row = rows.cast<Map<String, dynamic>?>().firstWhere(
-            (item) => item?['user_id'] == uid,
-            orElse: () => null,
-          );
-          return row == null ? null : WeeklyLeaderboardEntry.fromMap(row);
-        });
-  }
+  Stream<WeeklyLeaderboardEntry?> watchPlayer(String uid) => Stream.value(null);
 
   /// Anyone can read these safe views. Polling keeps guest access simple while
   /// the protected game tables remain private.

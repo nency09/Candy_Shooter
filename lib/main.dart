@@ -83,9 +83,13 @@ class AppModel extends ChangeNotifier {
   Set<int> claimedChapterRewards = <int>{};
   bool seenNewRowTutorial = false;
   String lastLuckySpin = '';
+  String guestLastLuckySpin = '';
   bool ready = false;
-  bool _loadingCloudProgress = false;
+  String? _loadingCloudProgressFor;
+  String? _activeAuthUserId;
+  int _authChangeGeneration = 0;
   bool _hasSignedInSession = false;
+  Future<void> _cloudSaveTail = Future<void>.value();
 
   Future<void> _load() async {
     final started = DateTime.now();
@@ -119,7 +123,10 @@ class AppModel extends ChangeNotifier {
               .whereType<int>()
               .toSet();
       seenNewRowTutorial = saved['seenNewRowTutorial'] as bool? ?? false;
-      lastLuckySpin = saved['lastLuckySpin'] as String? ?? '';
+      guestLastLuckySpin = saved['guestLastLuckySpin'] as String? ?? '';
+      lastLuckySpin = auth.currentUser == null
+          ? guestLastLuckySpin
+          : (saved['lastLuckySpin'] as String? ?? '');
     } catch (_) {
       // Invalid local data falls back to a fresh, playable profile.
     }
@@ -143,7 +150,7 @@ class AppModel extends ChangeNotifier {
 
   Future<void> _save() async {
     await _saveLocalProgress();
-    _saveCloudProgress();
+    unawaited(_saveCloudProgress());
   }
 
   Future<void> _saveLocalProgress() => _store.save(
@@ -178,8 +185,10 @@ class AppModel extends ChangeNotifier {
       'email': user?.email ?? '',
       'unlocked': unlocked,
       'coins': coins,
-      'stars': stars,
-      'scores': scores,
+      // A queued cloud save must preserve the state at the instant it was
+      // requested.  The model mutates these lists in place as levels finish.
+      'stars': List<int>.from(stars),
+      'scores': List<int>.from(scores),
       'sound': sound,
       'music': music,
       'haptics': haptics,
@@ -191,7 +200,7 @@ class AppModel extends ChangeNotifier {
       'goldenAimBoosters': goldenAimBoosters,
       'megaBombBoosters': megaBombBoosters,
       'extraSwapBoosters': extraSwapBoosters,
-      'claimedChapterRewards': claimedChapterRewards.toList(),
+      'claimedChapterRewards': claimedChapterRewards.toList(growable: false),
       'seenNewRowTutorial': seenNewRowTutorial,
       'lastLuckySpin': lastLuckySpin,
     };
@@ -200,18 +209,25 @@ class AppModel extends ChangeNotifier {
   void _onAuthChanged() {
     if (!ready) return;
     final user = auth.currentUser;
+    final uid = user?.id;
+    // Supabase emits several events for one session (including token refresh).
+    // Only an actual account change should reload cloud progress.
+    if (uid == _activeAuthUserId) return;
+    _activeAuthUserId = uid;
+    final generation = ++_authChangeGeneration;
     if (user != null) {
       _hasSignedInSession = true;
-      _loadCloudProgress(user.id);
+      unawaited(_loadCloudProgress(user.id, generation));
     } else if (_hasSignedInSession) {
       _hasSignedInSession = false;
-      _startFreshGuestSession();
+      unawaited(_startFreshGuestSession());
     }
   }
 
   Future<void> _startFreshGuestSession() async {
     await _store.clearGuestProgress();
     _applyFreshProgress();
+    lastLuckySpin = guestLastLuckySpin;
     notifyListeners();
   }
 
@@ -229,18 +245,20 @@ class AppModel extends ChangeNotifier {
     lastLuckySpin = '';
   }
 
-  Future<void> _loadCloudProgress(String uid) async {
-    if (_loadingCloudProgress) return;
-    _loadingCloudProgress = true;
+  Future<void> _loadCloudProgress(String uid, int generation) async {
+    _loadingCloudProgressFor = uid;
     final cloud = CloudProgressService(uid);
     try {
       final saved = await cloud.load();
       // The user may have logged out while their cloud save was loading.
-      if (auth.currentUser?.id != uid) return;
+      if (auth.currentUser?.id != uid || _authChangeGeneration != generation) {
+        return;
+      }
       if (saved == null) {
         // A new account starts with its own clean progress. It must not inherit
         // coins, boosters, or levels from the temporary guest session.
         _applyFreshProgress();
+        lastLuckySpin = '';
         await _saveLocalProgress();
         await cloud.save(_cloudProgressSnapshot());
         notifyListeners();
@@ -253,7 +271,9 @@ class AppModel extends ChangeNotifier {
     } catch (_) {
       // The game remains fully playable if the device is temporarily offline.
     } finally {
-      _loadingCloudProgress = false;
+      if (_loadingCloudProgressFor == uid) {
+        _loadingCloudProgressFor = null;
+      }
     }
   }
 
@@ -306,12 +326,23 @@ class AppModel extends ChangeNotifier {
     lastLuckySpin = saved['lastLuckySpin'] as String? ?? '';
   }
 
-  void _saveCloudProgress() {
+  Future<void> _saveCloudProgress() async {
     final user = auth.currentUser;
-    if (user == null || _loadingCloudProgress) return;
-    CloudProgressService(
-      user.id,
-    ).save(_cloudProgressSnapshot()).catchError((_) {});
+    if (user == null || _loadingCloudProgressFor == user.id) return;
+    final uid = user.id;
+    final snapshot = _cloudProgressSnapshot();
+    // Save complete snapshots in request order.  Without this queue a slow
+    // earlier request could finish after a newer one and overwrite progress.
+    final save = _cloudSaveTail.then((_) async {
+      if (auth.currentUser?.id != uid) return;
+      try {
+        await CloudProgressService(uid).save(snapshot);
+      } catch (_) {
+        // Local play remains available when a cloud save is temporarily offline.
+      }
+    });
+    _cloudSaveTail = save;
+    await save;
   }
 
   int boosterCount(BoosterType type) => switch (type) {
@@ -376,6 +407,9 @@ class AppModel extends ChangeNotifier {
   }) async {
     if (auth.currentUser == null) return;
     try {
+      // The database derives the public rank values from this cloud snapshot.
+      // Save first so it never receives a stale result from the previous win.
+      await _saveCloudProgress();
       await leaderboard.submitLeaderboardResult(
         score: score,
         levelReached: levelReached,
@@ -664,6 +698,10 @@ class AppModel extends ChangeNotifier {
       _awardLuckyPrize(prize);
     }
     lastLuckySpin = _today;
+    if (auth.currentUser == null) {
+      guestLastLuckySpin = lastLuckySpin;
+      await _store.saveGuestLuckySpin(guestLastLuckySpin);
+    }
     await _save();
     notifyListeners();
     return LuckySpinReward(
@@ -694,7 +732,9 @@ class AppModel extends ChangeNotifier {
     extraSwapBoosters = 0;
     claimedChapterRewards.clear();
     seenNewRowTutorial = false;
-    lastLuckySpin = '';
+    // Guest spin cooldown is deliberately stored separately from disposable
+    // guest progress. Signed-in accounts overwrite this with their own cloud
+    // value as soon as their profile finishes loading.
     await _save();
     notifyListeners();
   }
@@ -1216,11 +1256,14 @@ class _WorldPathMapState extends State<WorldPathMap> {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (_, constraints) {
       final width = constraints.maxWidth;
-      final firstVisibleLevel = math.max(1, widget.chapter.startLevel - 10);
-      final visibleLevels = levels
-          .skip(firstVisibleLevel - 1)
-          .take(20)
-          .toList();
+      // Keep every completed level visible below the current world. This
+      // preserves the requested bottom-to-top journey instead of replacing
+      // early progress with a rolling twenty-level window.
+      final visibleThrough = math
+          .max(widget.chapter.endLevel, widget.unlocked)
+          .clamp(1, levels.length)
+          .toInt();
+      final visibleLevels = levels.take(visibleThrough).toList();
       final mapHeight = math.max(
         constraints.maxHeight + 80,
         visibleLevels.length * 112.0 + 220,
@@ -1622,7 +1665,7 @@ class HomeProgressCard extends StatelessWidget {
       children: [
         Text(
           chapterForLevel(level).name,
-          style: TextStyle(
+          style: const TextStyle(
             color: Color(0xff684e67),
             fontWeight: FontWeight.w900,
           ),
@@ -1956,27 +1999,71 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           ),
         );
     }
+    // Ice is a two-hit blocker. Unlike a visual-only decoration, it occupies
+    // a real grid cell and must be cracked before normal matching can pass it.
+    for (
+      var index = 0;
+      index < widget.config.iceCount && board.isNotEmpty;
+      index++
+    ) {
+      final candidates = board
+          .where((cell) => !cell.isBomb && !cell.isMystery && !cell.isIce)
+          .toList();
+      if (candidates.isEmpty) break;
+      final selected = candidates[random.nextInt(candidates.length)];
+      board
+        ..remove(selected)
+        ..add(selected.copyWith(special: CandySpecial.ice, iceLayers: 2));
+    }
+    // Later level configuration now creates the declared special candies on
+    // the actual board, rather than leaving those values as unused metadata.
+    for (final name in widget.config.specialCandyTypes) {
+      final special = _specialFromConfig(name);
+      if (special == null) continue;
+      final candidates = board
+          .where(
+            (cell) =>
+                !cell.isBomb &&
+                !cell.isMystery &&
+                !cell.isIce &&
+                cell.special == null,
+          )
+          .toList();
+      if (candidates.isEmpty) break;
+      final selected = candidates[random.nextInt(candidates.length)];
+      board
+        ..remove(selected)
+        ..add(selected.copyWith(special: special));
+    }
     if (widget.config.id >= 51 && board.isNotEmpty) {
-      final candidates = board.where((cell) => cell.row >= 2).toList();
+      final candidates = board
+          .where(
+            (cell) =>
+                cell.row >= 2 &&
+                !cell.isBomb &&
+                !cell.isIce &&
+                cell.special == null,
+          )
+          .toList();
       final selected =
           (candidates.isEmpty ? board : candidates)[random.nextInt(
             candidates.isEmpty ? board.length : candidates.length,
           )];
       board
         ..remove(selected)
-        ..add(
-          CandyCell(
-            selected.row,
-            selected.col,
-            selected.color,
-            isMystery: true,
-            isBomb: selected.isBomb,
-          ),
-        );
+        ..add(selected.copyWith(isMystery: true));
     }
     current = widget.config.colors.first;
     next = widget.config.colors[1 % widget.config.colors.length];
   }
+
+  CandySpecial? _specialFromConfig(String name) => switch (name) {
+    'rainbow' => CandySpecial.rainbow,
+    'striped' => CandySpecial.striped,
+    'colorBomb' => CandySpecial.colorBomb,
+    'ice' => CandySpecial.ice,
+    _ => null,
+  };
 
   int _columnsForRow(int row, {int? phase}) =>
       7 - ((row + (phase ?? gridPhase)).isOdd ? 1 : 0);
@@ -2000,6 +2087,53 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     return board
         .where((other) => other != cell && neighborKeys.contains(other.key))
         .toList(growable: false);
+  }
+
+  bool _canJoinColorGroup(CandyCell cell, CandyColor color) =>
+      !cell.isBomb &&
+      !cell.isIce &&
+      (cell.color == color || cell.isMystery || cell.isRainbow);
+
+  /// Applies board-special effects to candies that are already being popped.
+  /// Striped candies clear their row, colour bombs clear their colour and a
+  /// bomb caught in either effect keeps its existing chain-reaction rule.
+  List<CandyCell> _expandSpecialPop(Iterable<CandyCell> initial) {
+    final targets = <CandyCell>{...initial};
+    var changed = true;
+    while (changed) {
+      changed = false;
+      for (final cell in targets.toList()) {
+        Iterable<CandyCell> extra = const <CandyCell>[];
+        if (cell.isBomb) {
+          extra = _bombBlast(cell, widget.config.bombRadius);
+        } else if (cell.isStriped) {
+          extra = board.where((other) => other.row == cell.row);
+        } else if (cell.isColorBomb) {
+          extra = board.where((other) => other.color == cell.color);
+        }
+        for (final cellToAdd in extra) {
+          if (targets.add(cellToAdd)) changed = true;
+        }
+      }
+    }
+    return targets.toList(growable: false);
+  }
+
+  /// A normal shot touching ice cracks it. Ice deliberately remains in its
+  /// logical cell after the first hit, then turns back into a normal candy on
+  /// the second hit so it never breaks grid positions or floating detection.
+  int _crackIceAround(CandyCell added) {
+    final iceTargets = _neighbors(added).where((cell) => cell.isIce).toList();
+    for (final ice in iceTargets) {
+      board
+        ..remove(ice)
+        ..add(
+          ice.iceLayers <= 1
+              ? ice.copyWith(clearSpecial: true, iceLayers: 0)
+              : ice.copyWith(iceLayers: ice.iceLayers - 1),
+        );
+    }
+    return iceTargets.length;
   }
 
   Offset? _velocity(Offset local, BoardGeometry g) {
@@ -2313,7 +2447,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
   Future<CandyColor?> _showColorBlastPicker() {
     final colors = board
-        .where((cell) => !cell.isBomb && !cell.isMystery)
+        .where((cell) => !cell.isBomb && !cell.isMystery && !cell.isIce)
         .map((cell) => cell.color)
         .toSet()
         .toList();
@@ -2350,9 +2484,17 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       if (mounted) setState(() => activeBooster = null);
       return;
     }
-    final targets = board
-        .where((cell) => cell.color == color && !cell.isBomb && !cell.isMystery)
-        .toList();
+    final targets = _expandSpecialPop(
+      board
+          .where(
+            (cell) =>
+                cell.color == color &&
+                !cell.isBomb &&
+                !cell.isMystery &&
+                !cell.isIce,
+          )
+          .toList(),
+    );
     if (targets.isEmpty ||
         !await widget.model.useBooster(BoosterType.colorBlast) ||
         !mounted) {
@@ -2422,7 +2564,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     }
     if (!await widget.model.useBooster(booster) || !mounted) return;
     setState(() {
-      final removed = switch (booster) {
+      final initialRemoved = switch (booster) {
         BoosterType.bomb =>
           board
               .where(
@@ -2447,6 +2589,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         BoosterType.goldenAim => const <CandyCell>[],
         BoosterType.extraSwap => const <CandyCell>[],
       };
+      final removed = _expandSpecialPop(initialRemoved);
       final mysteryReward = _claimMysteryRewards(removed);
       _showPop(removed, g);
       board.removeWhere(removed.contains);
@@ -2472,8 +2615,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       if (result.contains(cell)) continue;
       result.add(cell);
       for (final neighbor in _neighbors(cell)) {
-        if (!neighbor.isBomb &&
-            (neighbor.color == target.color || neighbor.isMystery) &&
+        if (_canJoinColorGroup(neighbor, target.color) &&
             !result.contains(neighbor)) {
           pending.add(neighbor);
         }
@@ -2616,7 +2758,11 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     // candy alternate between the left and right hex slot. Treat a narrow
     // centre corridor as vertical and resolve it consistently on the board
     // centre line. Deliberate angled shots still retain their left/right aim.
-    final nearVerticalAim = velocity.dx.abs() <= velocity.dy.abs() * .045;
+    // Golden Aim makes each of its three shots more forgiving: small finger
+    // movement stays on the intended centre lane instead of snapping away.
+    final aimTolerance = goldenAimShots > 0 ? .13 : .045;
+    final nearVerticalAim =
+        velocity.dx.abs() <= velocity.dy.abs() * aimTolerance;
     final snapImpact = nearVerticalAim
         ? Offset(g.launcher.dx, impact.dy)
         : impact;
@@ -2698,7 +2844,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     );
     bombExplosion = g.position(target);
     bombController.forward(from: 0);
-    final removed = _bombBlast(target, widget.config.bombRadius);
+    final removed = _expandSpecialPop(
+      _bombBlast(target, widget.config.bombRadius),
+    );
     shots--;
 
     if (removed.isEmpty) {
@@ -2751,7 +2899,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
               ? cell
               : closest,
         );
-    final removed = board.where((cell) => cell.row == target.row).toList();
+    final removed = _expandSpecialPop(
+      board.where((cell) => cell.row == target.row).toList(),
+    );
     if (removed.isEmpty) return;
 
     rocketBlastY = g.position(target).dy;
@@ -2809,6 +2959,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       _finish(false);
       return;
     }
+    final iceHits = _crackIceAround(added);
     final group = <CandyCell>[];
     final pending = <CandyCell>[added];
     while (pending.isNotEmpty) {
@@ -2816,8 +2967,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       if (group.contains(cell)) continue;
       group.add(cell);
       for (final neighbor in _neighbors(cell)) {
-        if (!neighbor.isBomb &&
-            (neighbor.color == added.color || neighbor.isMystery) &&
+        if (_canJoinColorGroup(neighbor, added.color) &&
             !group.contains(neighbor)) {
           pending.add(neighbor);
         }
@@ -2825,20 +2975,28 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     }
     final matched = group.length >= 3;
     if (matched) {
-      final mysteryReward = _claimMysteryRewards(group);
-      _showPop(group, g);
-      _playPopSound(group.length);
-      board.removeWhere(group.contains);
-      cleared += group.length;
-      if (added.color == CandyColor.lemon) yellowCleared += group.length;
+      final removed = _expandSpecialPop(group);
+      final mysteryReward = _claimMysteryRewards(removed);
+      _showPop(removed, g);
+      _playPopSound(removed.length);
+      board.removeWhere(removed.contains);
+      cleared += removed.length;
+      yellowCleared += removed
+          .where((cell) => cell.color == CandyColor.lemon)
+          .length;
       combo++;
-      score += group.length * 10 + math.max(0, combo - 1) * 10;
+      score += removed.length * 10 + math.max(0, combo - 1) * 10;
       praise =
           mysteryReward ??
           (combo > 1 ? 'Combo x$combo! Amazing!' : 'POP! Great shot!');
       final dropReward = _dropFloating(g);
       if (dropReward != null) praise = dropReward;
       if (widget.model.haptics) HapticFeedback.mediumImpact();
+    } else if (iceHits > 0) {
+      combo = 0;
+      score += iceHits * 5;
+      praise = iceHits == 1 ? 'Ice cracked!' : '$iceHits ice candies cracked!';
+      if (widget.model.haptics) HapticFeedback.selectionClick();
     } else {
       combo = 0;
       praise = 'Nice try \u2014 make 3!';
@@ -2852,7 +3010,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       praise = 'DANGER ZONE! Try again!';
       _finish(false);
     } else {
-      if (!matched) _countShotForIncomingRow();
+      if (!matched && iceHits == 0) _countShotForIncomingRow();
     }
   }
 
@@ -2870,16 +3028,26 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         (configuredSize == 0 ? columns : configuredSize.clamp(1, columns))
             .toInt();
     final firstColumn = (columns - size) ~/ 2;
+    final configuredSpecials = widget.config.specialCandyTypes
+        .map(_specialFromConfig)
+        .whereType<CandySpecial>()
+        .toList();
 
     return List<CandyCell>.generate(size, (index) {
       final col = firstColumn + index;
+      final special = configuredSpecials.isNotEmpty && random.nextDouble() < .08
+          ? configuredSpecials[random.nextInt(configuredSpecials.length)]
+          : null;
       return CandyCell(
         0,
         col,
         widget.config.colors[(rowsEntered + col) % widget.config.colors.length],
         isMystery:
+            special == null &&
             widget.config.newRowSpecialChance > 0 &&
             random.nextDouble() < widget.config.newRowSpecialChance,
+        special: special,
+        iceLayers: special == CandySpecial.ice ? 2 : 0,
       );
     });
   }
@@ -2915,17 +3083,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         board
           ..clear()
           ..addAll(incomingRow)
-          ..addAll(
-            movingBoard.map(
-              (cell) => CandyCell(
-                cell.row + 1,
-                cell.col,
-                cell.color,
-                isMystery: cell.isMystery,
-                isBomb: cell.isBomb,
-              ),
-            ),
-          );
+          ..addAll(movingBoard.map((cell) => cell.copyWith(row: cell.row + 1)));
         rowWarning = false;
         rowAnimating = true;
       });
@@ -2957,18 +3115,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
   bool _wouldReachDangerAfterIncomingRow(BoardGeometry g) => board.any(
     (cell) =>
-        g
-                .position(
-                  CandyCell(
-                    cell.row + 1,
-                    cell.col,
-                    cell.color,
-                    isMystery: cell.isMystery,
-                    isBomb: cell.isBomb,
-                  ),
-                  phase: gridPhase - 1,
-                )
-                .dy +
+        g.position(cell.copyWith(row: cell.row + 1), phase: gridPhase - 1).dy +
             g.ballDiameter / 2 >=
         g.dangerLine,
   );
@@ -3180,13 +3327,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   Offset _displayPosition(CandyCell cell, BoardGeometry g) {
     if (!rowAnimating) return g.position(cell);
     final target = g.position(
-      CandyCell(
-        cell.row + 1,
-        cell.col,
-        cell.color,
-        isMystery: cell.isMystery,
-        isBomb: cell.isBomb,
-      ),
+      cell.copyWith(row: cell.row + 1),
       phase: gridPhase - 1,
     );
     return Offset.lerp(
@@ -3201,6 +3342,13 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         ? BombCandy(size: size)
         : cell.isMystery
         ? MysteryCandy(size: size)
+        : cell.special != null
+        ? SpecialCandy(
+            color: cell.color,
+            special: cell.special!,
+            iceLayers: cell.iceLayers,
+            size: size,
+          )
         : CandyBall(color: cell.color, size: size);
     if (!colorBlastTargets.contains(cell.key)) return candy;
     return SizedBox.square(
@@ -3328,7 +3476,10 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                           children: [
                             Positioned.fill(
                               child: CustomPaint(
-                                painter: AimPainter(path: aimPath),
+                                painter: AimPainter(
+                                  path: aimPath,
+                                  golden: goldenAimShots > 0,
+                                ),
                               ),
                             ),
                             Positioned(
@@ -3766,14 +3917,16 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 }
 
 class AimPainter extends CustomPainter {
-  AimPainter({required this.path});
+  AimPainter({required this.path, this.golden = false});
 
   final List<Offset> path;
+  final bool golden;
 
   @override
   void paint(Canvas canvas, Size size) {
     if (path.length < 2) return;
-    final paint = Paint()..color = Colors.white70;
+    final paint = Paint()
+      ..color = golden ? const Color(0xffffdf55) : Colors.white70;
     for (var segment = 0; segment < path.length - 1; segment++) {
       final start = path[segment];
       final end = path[segment + 1];
@@ -3786,17 +3939,27 @@ class AimPainter extends CustomPainter {
       ) {
         canvas.drawCircle(
           start + direction / direction.distance * distance,
-          2.3,
+          golden ? 3.1 : 2.3,
           paint,
         );
       }
-      canvas.drawCircle(end, 2.3, paint);
+      canvas.drawCircle(end, golden ? 4.8 : 2.3, paint);
+      if (golden && segment == path.length - 2) {
+        canvas.drawCircle(
+          end,
+          8,
+          Paint()
+            ..color = const Color(0x66ffe676)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2,
+        );
+      }
     }
   }
 
   @override
   bool shouldRepaint(covariant AimPainter oldDelegate) =>
-      oldDelegate.path != path;
+      oldDelegate.path != path || oldDelegate.golden != golden;
 }
 
 class ResultOverlay extends StatelessWidget {
@@ -5330,7 +5493,7 @@ class BoosterShopScreen extends StatelessWidget {
       price: 150,
       icon: Icons.auto_awesome_rounded,
       color: Color(0xff7b5bd1),
-      description: 'Pop every candy of one colour.',
+      description: 'Use a rainbow candy as a wildcard match.',
     ),
     ShopOffer(
       type: BoosterType.lightning,
@@ -6795,6 +6958,91 @@ class CandyBall extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class SpecialCandy extends StatelessWidget {
+  const SpecialCandy({
+    super.key,
+    required this.color,
+    required this.special,
+    required this.iceLayers,
+    required this.size,
+  });
+
+  final CandyColor color;
+  final CandySpecial special;
+  final int iceLayers;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, iconColor, overlay) = switch (special) {
+      CandySpecial.rainbow => (
+        Icons.auto_awesome_rounded,
+        const Color(0xffffef8a),
+        const Color(0x667b5bd1),
+      ),
+      CandySpecial.striped => (
+        Icons.horizontal_rule_rounded,
+        Colors.white,
+        const Color(0x66f6538a),
+      ),
+      CandySpecial.colorBomb => (
+        Icons.color_lens_rounded,
+        Colors.white,
+        const Color(0x6674509c),
+      ),
+      CandySpecial.ice => (
+        Icons.ac_unit_rounded,
+        const Color(0xffdff8ff),
+        const Color(0x8873d6f4),
+      ),
+    };
+    return SizedBox.square(
+      dimension: size,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          CandyBall(color: color, size: size),
+          Container(
+            width: size * .78,
+            height: size * .78,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: overlay,
+              border: Border.all(
+                color: special == CandySpecial.ice
+                    ? const Color(0xffe5fbff)
+                    : Colors.white.withValues(alpha: .7),
+                width: math.max(1.2, size * .035),
+              ),
+            ),
+          ),
+          Icon(icon, color: iconColor, size: size * .45),
+          if (special == CandySpecial.ice && iceLayers > 1)
+            Positioned(
+              right: size * .09,
+              bottom: size * .07,
+              child: Container(
+                padding: EdgeInsets.symmetric(horizontal: size * .07),
+                decoration: BoxDecoration(
+                  color: const Color(0xff4c91cb),
+                  borderRadius: BorderRadius.circular(size),
+                ),
+                child: Text(
+                  '$iceLayers',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: size * .19,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }

@@ -19,6 +19,7 @@ class ProgressService {
   static const _claimedChapterRewards = 'claimedChapterRewards';
   static const _seenNewRowTutorial = 'seenNewRowTutorial';
   static const _lastLuckySpin = 'lastLuckySpin';
+  static const _guestLastLuckySpin = 'guestLastLuckySpin';
 
   Future<Map<String, Object>> load() async {
     final p = await SharedPreferences.getInstance();
@@ -42,6 +43,7 @@ class ProgressService {
           p.getStringList(_claimedChapterRewards) ?? const <String>[],
       'seenNewRowTutorial': p.getBool(_seenNewRowTutorial) ?? false,
       'lastLuckySpin': p.getString(_lastLuckySpin) ?? '',
+      'guestLastLuckySpin': p.getString(_guestLastLuckySpin) ?? '',
     };
   }
 
@@ -116,7 +118,8 @@ class ProgressService {
   }
 
   /// Guest players have a temporary game session. Keep their accessibility
-  /// preferences, but remove all gameplay progress before the next launch.
+  /// preferences and the device-level daily-spin cooldown, but remove all
+  /// gameplay progress before the next launch.
   Future<void> clearGuestProgress() async {
     final p = await SharedPreferences.getInstance();
     await Future.wait([
@@ -134,7 +137,11 @@ class ProgressService {
       p.remove(_extraSwapBoosters),
       p.remove(_claimedChapterRewards),
       p.remove(_seenNewRowTutorial),
-      p.remove(_lastLuckySpin),
     ]);
+  }
+
+  Future<void> saveGuestLuckySpin(String value) async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(_guestLastLuckySpin, value);
   }
 }
